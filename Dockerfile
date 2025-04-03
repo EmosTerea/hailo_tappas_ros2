@@ -47,7 +47,7 @@ RUN apt-get install -y supervisor vim
 # Download Raspberry Pi examples
 RUN git clone --depth 1 https://github.com/raspberrypi/rpicam-apps.git
 
-RUN echo "export ROS_DOMAIN_ID=20" >> ~/.bashrc && \
+RUN echo "export ROS_DOMAIN_ID=0" >> ~/.bashrc && \
     echo "source /opt/ros/$ROS_DISTRO/setup.bash" >> ~/.bashrc && \
     echo "source /workspaces/install/setup.bash" >> ~/.bashrc && \
     echo "export TAPPAS_POST_PROC_DIR=$(pkg-config --variable=tappas_postproc_lib_dir hailo-tappas-core)" >> ~/.bashrc
@@ -95,6 +95,16 @@ RUN source /opt/ros/jazzy/setup.bash && \
 COPY ros_entrypoint.sh /ros_entrypoint.sh
 RUN chmod +x  /ros_entrypoint.sh
 ENTRYPOINT ["/ros_entrypoint.sh"]
+
+# vision_opencv
+RUN source /opt/ros/jazzy/setup.bash && \
+    cd /workspaces/src && \
+    git clone --depth 1 https://github.com/ros-perception/vision_opencv.git -b humble
+
+RUN source /opt/ros/jazzy/setup.bash && \
+    cd /workspaces && \
+    colcon build --symlink-install
+
 
 USER $USERNAME
 # terminal colors with xterm
