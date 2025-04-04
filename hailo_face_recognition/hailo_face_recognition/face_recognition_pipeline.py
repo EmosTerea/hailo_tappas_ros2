@@ -46,9 +46,12 @@ class GStreamerFaceRecognitionApp(GStreamerApp):
         app_callback: Callable[
             [gi.repository.Gst.Pad, gi.repository.Gst.PadProbeInfo], None
         ],
+        external_source=False,
     ):
         # Call the parent class constructor
-        super().__init__(input, video_width, video_height, video_fps)
+        super().__init__(
+            input, video_width, video_height, video_fps, external_source=external_source
+        )
 
         self.app_callback = app_callback
         self.object_detection = object_detection
@@ -60,7 +63,7 @@ class GStreamerFaceRecognitionApp(GStreamerApp):
         nms_iou_threshold = 0.45
 
         self.current_path = os.path.dirname(os.path.abspath(__file__))
-        infra_post_process_path = "/hailo-apps-infra/resources/"
+        infra_post_process_path = "/usr/local/lib/python3.11/dist-packages/resources/"
         tappas_post_process_path = (
             "/usr/lib/aarch64-linux-gnu/hailo/tappas/post_processes/"
         )
@@ -164,7 +167,7 @@ class GStreamerFaceRecognitionApp(GStreamerApp):
         return pre_detection_pipeline
 
     def object_detection_pipeline(self):
-        object_detection_pipeline = ''
+        object_detection_pipeline = ""
         if self.object_detection:
             object_detection_pipeline = (
                 "queue leaky=no max-size-buffers=30 max-size-bytes=0 max-size-time=0 ! "

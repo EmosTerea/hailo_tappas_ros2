@@ -20,9 +20,7 @@ from hailo_msgs.srv import (
     SaveGalleryItem,
     DeleteGalleryItem,
 )
-from hailo_common.hailo_detection import (
-    HailoDetection
-)
+from hailo_common.hailo_detection import HailoDetection
 from hailo_common.embeddings_gallery import (
     Gallery,
     GalleryAppendStatus,
@@ -40,6 +38,8 @@ from vision_msgs.msg import (
     Detection2DArray,
     Detection2D,
 )
+
+from cv_bridge import CvBridge
 
 
 class FaceRecognitionNode(Node):
@@ -89,7 +89,9 @@ class FaceRecognitionNode(Node):
             self.get_parameter("video_height").get_parameter_value().integer_value
         )
         video_fps = self.get_parameter("video_fps").get_parameter_value().integer_value
-        object_detection = self.get_parameter("object_detection").get_parameter_value().bool_value
+        object_detection = (
+            self.get_parameter("object_detection").get_parameter_value().bool_value
+        )
 
         gallery_file_path = self._get_absolute_file_path_in_build_dir(
             local_gallery_file
@@ -103,17 +105,37 @@ class FaceRecognitionNode(Node):
             self.gallery, self.frame_callback, self.detection_callback
         )
 
-        gstreamer_app = GStreamerFaceRecognitionApp(
+        self.gstreamer_app = GStreamerFaceRecognitionApp(
             input,
             video_width,
             video_height,
             video_fps,
             object_detection,
             self.face_recognition.app_callback,
+            external_source=False,
         )
 
-        self.detection_thread = Thread(target=gstreamer_app.run)
+        self.detection_thread = Thread(target=self.gstreamer_app.run)
         self.detection_thread.start()
+
+        self.bridge = CvBridge()
+        self.image_sub = self.create_subscription(
+            Image, "/camera", self._on_camera_image, qos_profile=10
+        )
+
+        def _on_camera_image(self, msg: Image):
+            # Convert ROS Image message to OpenCV image (BGR8)
+            frame = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+            # Optionally, resize or crop frame to match self.gstreamer_app.video_width/height
+            # Push frame to GStreamer pipeline
+            try:
+                # If queue is full, drop the oldest frame to keep up in real-time
+                if self.gstreamer_app.frame_queue.full():
+                    self.gstreamer_app.frame_queue.get_nowait()  # discard one
+                self.gstreamer_app.frame_queue.put_nowait(frame)
+            except Exception as e:
+                # Handle queue errors if any (optional logging)
+                pass
 
     def _get_absolute_file_path_in_build_dir(self, file: str) -> str:
         # Get the directory of the current Python file

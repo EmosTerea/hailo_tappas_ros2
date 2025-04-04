@@ -24,6 +24,7 @@ import threading
 import sys
 import cv2
 import numpy as np
+from sensor_msgs.msg import Image
 
 gi.require_version("Gst", "1.0")
 
@@ -43,6 +44,7 @@ class GStreamerApp:
         video_width: int = 1280,
         video_height: int = 720,
         video_fps: int = 15,
+        external_source=False,
     ):
         # Set the process title
         setproctitle.setproctitle("Hailo Python App")
@@ -76,6 +78,8 @@ class GStreamerApp:
         self.video_format = "RGB"
         self.hef_path = None
         self.app_callback = None
+
+        self.external_source = external_source
 
     def on_fps_measurement(self, sink, fps, droprate, avgfps):
         print(f"FPS: {fps:.2f}, Droprate: {droprate:.2f}, Avg FPS: {avgfps:.2f}")
@@ -174,18 +178,67 @@ class GStreamerApp:
         disable_qos(self.pipeline)
 
         if self.source_type == "rpi":
-            picam_thread = threading.Thread(
-                target=picamera_thread,
-                args=(
-                    self.pipeline,
-                    self.video_width,
-                    self.video_height,
-                    self.video_fps,
-                    self.video_format,
-                ),
-            )
-            self.threads.append(picam_thread)
-            picam_thread.start()
+            appsrc = self.pipeline.get_by_name("app_source")
+            appsrc.set_property("is-live", True)
+            appsrc.set_property("format", Gst.Format.TIME)
+            if self.external_source:
+                # External ROS feed: set caps and prepare push thread (no PiCamera)
+                caps_str = (
+                    f"video/x-raw, format={self.video_format}, "
+                    f"width={self.video_width}, height={self.video_height}, "
+                    f"framerate={self.video_fps}/1, pixel-aspect-ratio=1/1"
+                )
+                appsrc.set_property("caps", Gst.Caps.from_string(caps_str))
+
+                # Initialize a queue for incoming frames
+                import queue
+
+                self.frame_queue = queue.Queue(maxsize=5)
+
+                # Define a thread to push frames from the queue into appsrc
+                def push_frames_to_appsrc():
+                    frame_count = 0
+                    # Duration of each frame in nanoseconds (based on video_fps)
+                    buffer_duration = Gst.util_uint64_scale_int(
+                        1, Gst.SECOND, self.video_fps
+                    )
+                    while True:
+                        frame = self.frame_queue.get()  # Wait for next frame from ROS
+                        if frame is None:
+                            break  # None can be used as a signal to terminate the thread
+                        # **Convert BGR to RGB** (if needed for pipeline format)
+                        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        # Wrap frame bytes in a GstBuffer
+                        buffer = Gst.Buffer.new_wrapped(rgb_frame.tobytes())
+                        buffer.pts = frame_count * buffer_duration
+                        buffer.duration = buffer_duration
+                        # Push buffer into the pipeline
+                        ret = appsrc.emit("push-buffer", buffer)
+                        if ret != Gst.FlowReturn.OK:
+                            print(
+                                f"Warning: push-buffer returned {ret}", file=sys.stderr
+                            )
+                        frame_count += 1
+
+                # Start the pushing thread (daemon so it exits with main program)
+                push_thread = threading.Thread(
+                    target=push_frames_to_appsrc, daemon=True
+                )
+                self.threads.append(push_thread)
+                push_thread.start()
+            else:
+                picam_thread = threading.Thread(
+                    target=picamera_thread,
+                    args=(
+                        self.pipeline,
+                        self.video_width,
+                        self.video_height,
+                        self.video_fps,
+                        self.video_format,
+                    ),
+                )
+                self.threads.append(picam_thread)
+                picam_thread.start()
 
         # Set the pipeline to PAUSED to ensure elements are initialized
         self.pipeline.set_state(Gst.State.PAUSED)
