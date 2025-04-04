@@ -92,10 +92,6 @@ RUN source /opt/ros/jazzy/setup.bash && \
     colcon test --packages-skip vision_msgs vision_msgs_rviz_plugins \
         --return-code-on-test-failure --event-handlers console_direct+
 
-COPY ros_entrypoint.sh /ros_entrypoint.sh
-RUN chmod +x  /ros_entrypoint.sh
-ENTRYPOINT ["/ros_entrypoint.sh"]
-
 # vision_opencv
 RUN source /opt/ros/jazzy/setup.bash && \
     cd /workspaces/src && \
@@ -104,7 +100,10 @@ RUN source /opt/ros/jazzy/setup.bash && \
 RUN source /opt/ros/jazzy/setup.bash && \
     cd /workspaces && \
     colcon build --symlink-install
-
+    
+COPY ros_entrypoint.sh /ros_entrypoint.sh
+RUN chmod +x  /ros_entrypoint.sh
+ENTRYPOINT ["/ros_entrypoint.sh"]
 
 USER $USERNAME
 # terminal colors with xterm
