@@ -134,7 +134,7 @@ class FaceRecognitionNode(Node):
                     self.gstreamer_app.frame_queue.get_nowait()  # discard one
                 self.gstreamer_app.frame_queue.put_nowait(frame)
             except Exception as e:
-                # Handle queue errors if any (optional logging)
+                print("Error in face recognition node:", e)
                 pass
 
     def _get_absolute_file_path_in_build_dir(self, file: str) -> str:

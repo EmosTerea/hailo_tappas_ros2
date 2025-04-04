@@ -105,7 +105,6 @@ COPY ros_entrypoint.sh /ros_entrypoint.sh
 RUN chmod +x  /ros_entrypoint.sh
 ENTRYPOINT ["/ros_entrypoint.sh"]
 
-USER $USERNAME
 # terminal colors with xterm
 ENV TERM xterm
 WORKDIR /workspaces/src/hailo_tappas_ros2

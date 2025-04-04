@@ -24,7 +24,6 @@ import threading
 import sys
 import cv2
 import numpy as np
-from sensor_msgs.msg import Image
 
 gi.require_version("Gst", "1.0")
 

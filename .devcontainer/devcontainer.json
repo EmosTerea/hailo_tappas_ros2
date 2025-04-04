@@ -1,21 +1,34 @@
 {
-    "name": "hailo-tappas-ros2",
-    "dockerComposeFile": "../docker-compose.yaml",
-    "service": "hailo-tappas-service",
-    "workspaceFolder": "/workspaces/src/hailo_tappas_ros2",
-    "overrideCommand": false,
-    "customizations": {
-      "vscode": {
-        "extensions": [
-            "ms-python.python@2024.4.1",
-            "ms-python.black-formatter",
-            "ms-vscode.cpptools-extension-pack",
-            "ms-vscode.cmake-tools",
-            "twxs.cmake",
-            "yzhang.markdown-all-in-one",
-            "github.vscode-github-actions",
-            "DavidAnson.vscode-markdownlint"
-        ]
-      }
+  "name": "hailo-tappas-ros2",
+  "build": {
+    "dockerfile": "../Dockerfile"
+  },
+  "workspaceFolder": "/workspaces/src/hailo_tappas_ros2",
+  "overrideCommand": true,
+  "runArgs": [
+    "--privileged",
+    "--network=host",
+    "--ipc=host",
+    //"--env", "XDG_RUNTIME_DIR=${env:XDG_RUNTIME_DIR}",
+    "--env", "UDEV=1",
+    //"--volume", "/tmp/.X11-unix:/tmp/.X11-unix",
+    "--volume", "/dev:/dev",
+    "--volume", "/lib/firmware:/lib/firmware",
+    "--volume", "/run/udev:/run/udev:ro",
+    "--device", "/dev/dri:/dev/dri"
+  ],
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python@2024.4.1",
+        "ms-python.black-formatter",
+        "ms-vscode.cpptools-extension-pack",
+        "ms-vscode.cmake-tools",
+        "twxs.cmake",
+        "yzhang.markdown-all-in-one",
+        "github.vscode-github-actions",
+        "DavidAnson.vscode-markdownlint"
+      ]
     }
   }
+}
