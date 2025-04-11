@@ -1,8 +1,9 @@
-FROM --platform=linux/arm64 debian:bookworm
+FROM --platform=linux/arm64 debian:bullseye
 
 SHELL ["/bin/bash", "-c"]
 
-ENV ROS_DISTRO jazzy
+# Switch to ROS 2 Humble
+ENV ROS_DISTRO humble
 ENV LANG en_US.UTF-8
 
 # Install generic requirements
@@ -13,13 +14,14 @@ RUN apt-get update && \
 # https://groups.google.com/g/linux.debian.bugs.dist/c/6gM_eBs4LgE
 RUN echo "# See sources.lists.d directory" > /etc/apt/sources.list
 
-RUN wget https://s3.ap-northeast-1.wasabisys.com/download-raw/dpkg/ros2-desktop/debian/bookworm/ros-jazzy-desktop-0.3.2_20240525_arm64.deb && \
-    apt install -y ./ros-jazzy-desktop-0.3.2_20240525_arm64.deb && \
+# Install ROS 2 Humble Desktop for Bullseye (community-built .deb)
+RUN wget https://github.com/Ar-Ray-code/rpi-bullseye-ros2/releases/download/ros2-0.3.1/ros-humble-desktop-0.3.1_20221218_arm64.deb && \
+    apt install -y ./ros-humble-desktop-0.3.1_20221218_arm64.deb && \
     pip install --break-system-packages vcstool psutil colcon-common-extensions
 
-# Add Raspberry Pi repository, as this is where we will get the Hailo deb packages
+# Add Raspberry Pi repository (Bullseye), as this is where we will get the Hailo deb packages
 RUN apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 82B129927FA3303E && \
-    apt-add-repository -y -S deb http://archive.raspberrypi.com/debian/ bookworm main
+    apt-add-repository -y -S deb http://archive.raspberrypi.com/debian/ bullseye main
 
 # Dependencies for hailo-tappas-core
 RUN apt-get update && apt-get install -y python3 ffmpeg x11-utils python3-dev python3-pip \
@@ -47,6 +49,7 @@ RUN apt-get install -y supervisor vim
 # Download Raspberry Pi examples
 RUN git clone --depth 1 https://github.com/raspberrypi/rpicam-apps.git
 
+# Append environment setups to bashrc
 RUN echo "export ROS_DOMAIN_ID=20" >> ~/.bashrc && \
     echo "source /opt/ros/$ROS_DISTRO/setup.bash" >> ~/.bashrc && \
     echo "source /workspaces/install/setup.bash" >> ~/.bashrc && \
@@ -56,7 +59,9 @@ RUN echo "export ROS_DOMAIN_ID=20" >> ~/.bashrc && \
 RUN pip uninstall em --break-system-packages && pip install empy==3.3.4 --break-system-packages
 
 RUN mkdir -p /workspaces/src/
-RUN source /opt/ros/jazzy/setup.bash && \
+
+# Build vision_msgs from source
+RUN source /opt/ros/$ROS_DISTRO/setup.bash && \
     cd /workspaces/src && \
     git clone --depth 1 --branch 4.1.1 https://github.com/ros-perception/vision_msgs.git && \
     cd /workspaces && \
@@ -76,28 +81,30 @@ RUN mkdir -p /workspaces/src/hailo_tappas_ros2/
 COPY . /workspaces/src/hailo_tappas_ros2/
 RUN cp /workspaces/src/hailo_tappas_ros2/supervisor/hailo.conf /etc/supervisor/conf.d/
 
-# Install requirements
+# Install requirements for hailo_tappas_ros2
 RUN cd /workspaces/src/hailo_tappas_ros2 && \
     pip install -r requirements.txt --break-system-packages && \
     ./download_resources.sh
 
 # Build project
-RUN source /opt/ros/jazzy/setup.bash && \
+RUN source /opt/ros/$ROS_DISTRO/setup.bash && \
     cd /workspaces && \
     colcon build --symlink-install --packages-skip vision_msgs vision_msgs_rviz_plugins
 
 # Test project
-RUN source /opt/ros/jazzy/setup.bash && \
+RUN source /opt/ros/$ROS_DISTRO/setup.bash && \
     cd /workspaces && \
     colcon test --packages-skip vision_msgs vision_msgs_rviz_plugins \
         --return-code-on-test-failure --event-handlers console_direct+
 
 COPY ros_entrypoint.sh /ros_entrypoint.sh
-RUN chmod +x  /ros_entrypoint.sh
+RUN chmod +x /ros_entrypoint.sh
 ENTRYPOINT ["/ros_entrypoint.sh"]
 
 USER $USERNAME
+
 # terminal colors with xterm
 ENV TERM xterm
+
 WORKDIR /workspaces/src/hailo_tappas_ros2
 CMD ["/bin/sh", "-c", "bash"]

@@ -1,21 +1,54 @@
 {
-    "name": "hailo-tappas-ros2",
-    "dockerComposeFile": "../docker-compose.yaml",
-    "service": "hailo-tappas-service",
-    "workspaceFolder": "/workspaces/src/hailo_tappas_ros2",
-    "overrideCommand": false,
-    "customizations": {
-      "vscode": {
-        "extensions": [
-            "ms-python.python@2024.4.1",
-            "ms-python.black-formatter",
-            "ms-vscode.cpptools-extension-pack",
-            "ms-vscode.cmake-tools",
-            "twxs.cmake",
-            "yzhang.markdown-all-in-one",
-            "github.vscode-github-actions",
-            "DavidAnson.vscode-markdownlint"
-        ]
-      }
+  "name": "hailo-tappas-ros2",
+  // We build from our Dockerfile instead of using docker-compose.
+  "build": {
+    "dockerfile": "Dockerfile",
+    // If your Dockerfile is one directory up, adjust context accordingly
+    "context": "."
+  },
+
+  // The runArgs replicate the settings from your docker-compose.yml
+  "runArgs": [
+    // Pass environment variables
+    "-e", "XDG_RUNTIME_DIR=${localEnv:XDG_RUNTIME_DIR}",
+    "-e", "UDEV=1",
+
+    // Map devices
+    "--device=/dev/dri:/dev/dri",
+
+    // Map volumes
+    "-v", "/tmp/.X11-unix:/tmp/.X11-unix",
+    "-v", "/dev:/dev",
+    "-v", "/lib/firmware:/lib/firmware",
+    "-v", "/run/udev:/run/udev:ro",
+
+    // Networking and privileges
+    "--privileged",
+    "--net=host",
+    "--ipc=host"
+
+    // Typically 'restart: always' is not used for dev containers, so omit it here
+  ],
+
+  // For VS Code customizations
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python@2024.4.1",
+        "ms-python.black-formatter",
+        "ms-vscode.cpptools-extension-pack",
+        "ms-vscode.cmake-tools",
+        "twxs.cmake",
+        "yzhang.markdown-all-in-one",
+        "github.vscode-github-actions",
+        "DavidAnson.vscode-markdownlint"
+      ]
     }
-  }
+  },
+
+  // Same workspace folder as before
+  "workspaceFolder": "/workspaces/src/hailo_tappas_ros2",
+
+  // Keep the same overrideCommand settings if needed
+  "overrideCommand": false
+}
