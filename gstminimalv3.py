@@ -12,7 +12,6 @@ from vision_msgs.msg import (
     BoundingBox2D,
 )
 
-
 import gi
 
 gi.require_version("Gst", "1.0")
@@ -29,6 +28,9 @@ from hailo_apps_infra.hailo_rpi_common import get_caps_from_pad, get_numpy_from_
 class RosCameraNode(Node):
     def __init__(self):
         super().__init__("RosCameraNode")
+
+        # Use this to store the frame_id from the first image message we receive.
+        self._camera_frame_id = None
 
         # Create the GStreamer pipeline (with appsrc)
         self.pipeline = None
@@ -61,7 +63,7 @@ queue name=q1 max-size-buffers=2 leaky=downstream max-size-bytes=0 max-size-time
 jpegdec !
 queue name=q2 max-size-buffers=2 leaky=downstream max-size-bytes=0 max-size-time=0 !
 videoconvert !
-videoscale !
+videoscale method=0 add-borders=true !
 video/x-raw,format=RGB,width=640,height=640,framerate=30/1 !
 queue name=q3 max-size-buffers=2 leaky=downstream max-size-bytes=0 max-size-time=0 !
 hailonet hef-path=yolov8m.hef
@@ -120,33 +122,25 @@ fakevideosink sync=false
         # 2. Convert hailo_detections -> vision_msgs/Detection2DArray
         detection_msg = self._map_hailo_detections(hailo_detections)
 
-        # (Optional) We also want to retrieve the actual image frame if we want to draw bounding boxes:
-        # For that, we need the frame width/height/format from the pad caps.
-        # You can use the helper utilities from Hailo:
-        # format, width, height = get_caps_from_pad(pad)
-        # frame_np = get_numpy_from_buffer(buffer, format, width, height)
-        #
-        # If you do not have these helper functions imported, you can replicate them directly, or see Hailo’s example code.
-        #
-        # Here’s a simplified approach (assuming "RGB" caps from your pipeline):
+        # Use the stored camera frame_id if available, otherwise a fallback
+        detection_msg.header.frame_id = self._camera_frame_id or "camera_frame"
+
+        # Retrieve the caps and read out the image data
         caps = pad.get_current_caps()
         structure = caps.get_structure(0)
         width = structure.get_value("width")
         height = structure.get_value("height")
-        # format might be "RGB"
-        # We'll assume "RGB" for demonstration:
-        # Extract raw image bytes
+
         success, map_info = buffer.map(Gst.MapFlags.READ)
         if not success:
             self.get_logger().warn("Failed to map GstBuffer.")
             return Gst.PadProbeReturn.OK
 
         frame_data = map_info.data  # raw bytes
-        # Convert raw bytes to a NumPy array
         frame_np = np.frombuffer(frame_data, dtype=np.uint8).reshape((height, width, 3))
         buffer.unmap(map_info)
 
-        # Now we have an RGB image
+        # Convert from RGB to BGR for OpenCV
         frame_bgr = cv2.cvtColor(frame_np, cv2.COLOR_RGB2BGR)
 
         # 3. Optionally draw bounding boxes on frame_bgr
@@ -155,7 +149,6 @@ fakevideosink sync=false
             label = det.get_label()
             conf = det.get_confidence()
 
-            # hailo.HailoBBox.xmin()/ymin()/width()/height()
             x_min = int(bbox.xmin())
             y_min = int(bbox.ymin())
             w = int(bbox.width())
@@ -163,7 +156,6 @@ fakevideosink sync=false
             x_max = x_min + w
             y_max = y_min + h
 
-            # Draw bounding box
             cv2.rectangle(frame_bgr, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2)
             cv2.putText(
                 frame_bgr,
@@ -183,6 +175,7 @@ fakevideosink sync=false
         if success:
             compressed_msg = CompressedImage()
             compressed_msg.header.stamp = self.get_clock().now().to_msg()
+            compressed_msg.header.frame_id = self._camera_frame_id or "camera_frame"
             compressed_msg.format = "jpeg"
             compressed_msg.data = encoded.tobytes()
             self.image_bbx_pub.publish(compressed_msg)
@@ -193,7 +186,8 @@ fakevideosink sync=false
         """Convert a list of hailo.HAILO_DETECTION to a Detection2DArray message."""
         detection_array_msg = Detection2DArray()
         detection_array_msg.header.stamp = self.get_clock().now().to_msg()
-        detection_array_msg.header.frame_id = "camera_frame"  # or some TF frame
+        # We'll set frame_id outside (in _my_detection_callback) since we need
+        # the stored frame ID from the camera.
 
         for det in hailo_detections:
             label = det.get_label()
@@ -240,14 +234,12 @@ fakevideosink sync=false
         elif msg_type == Gst.MessageType.ERROR:
             err, debug = message.parse_error()
             self.get_logger().error(f"GStreamer Error: {err}, debug={debug}")
-            # In production, decide whether to shut down or attempt to recover
             self.shutdown_pipeline()
 
         return True
 
     def _start_gst_mainloop(self):
         """Starts the GLib main loop in a separate thread, so GStreamer can process the pipeline."""
-        # Initialize and run pipeline
         self.pipeline.set_state(Gst.State.PAUSED)
         self.pipeline.set_state(Gst.State.PLAYING)
 
@@ -266,6 +258,10 @@ fakevideosink sync=false
 
     def image_callback(self, msg: CompressedImage):
         """ROS subscription callback for camera topic (JPEG-compressed)."""
+        # Save the frame_id from this topic once (assuming it never changes).
+        if self._camera_frame_id is None:
+            self._camera_frame_id = msg.header.frame_id
+            self.get_logger().info(f"Storing camera frame_id: {self._camera_frame_id}")
 
         if not self.appsrc:
             self.get_logger().warn("appsrc not initialized yet")
@@ -281,7 +277,6 @@ fakevideosink sync=false
             self.get_logger().error(f"push-buffer failed: {ret}")
 
     def destroy_node(self):
-        # Clean up GStreamer
         self.shutdown_pipeline()
         super().destroy_node()
 
