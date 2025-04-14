@@ -45,7 +45,9 @@ class RosCameraNode(Node):
             CompressedImage, "/camera/compressed", self.image_callback, 10
         )
 
-        self.detections_pub = self.create_publisher(Detection2DArray, "detections", 10)
+        self.detections_pub = self.create_publisher(
+            Detection2DArray, "object_detections_2d", 10
+        )
         self.image_bbx_pub = self.create_publisher(
             CompressedImage, "image_bbx/compressed", 10
         )
@@ -202,10 +204,10 @@ fakevideosink sync=false
             center_x = bbox.xmin() + bbox.width() / 2.0
             center_y = bbox.ymin() + bbox.height() / 2.0
 
-            detection_msg.bbox.center.position.x = center_x
-            detection_msg.bbox.center.position.y = center_y
-            detection_msg.bbox.size_x = bbox.width()
-            detection_msg.bbox.size_y = bbox.height()
+            detection_msg.bbox.center.position.x = center_x * 1920
+            detection_msg.bbox.center.position.y = center_y * 1080
+            detection_msg.bbox.size_x = bbox.width() * 1920
+            detection_msg.bbox.size_y = bbox.height() * 1080
 
             # Add the ObjectHypothesisWithPose
             hypothesis = ObjectHypothesisWithPose()
