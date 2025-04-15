@@ -1,36 +1,17 @@
 {
-  "name": "hailo-tappas-ros2",
-  // We build from our Dockerfile instead of using docker-compose.
-  "build": {
-    "dockerfile": "Dockerfile",
-    // If your Dockerfile is one directory up, adjust context accordingly
-    "context": "."
-  },
-
-  // The runArgs replicate the settings from your docker-compose.yml
+  "name": "hailo-tappas-ros2-minimal",
+  "dockerFile": "../Dockerfile",
   "runArgs": [
-    // Pass environment variables
     "-e", "XDG_RUNTIME_DIR=${localEnv:XDG_RUNTIME_DIR}",
     "-e", "UDEV=1",
-
-    // Map devices
     "--device=/dev/dri:/dev/dri",
-
-    // Map volumes
     "-v", "/tmp/.X11-unix:/tmp/.X11-unix",
     "-v", "/dev:/dev",
     "-v", "/lib/firmware:/lib/firmware",
     "-v", "/run/udev:/run/udev:ro",
-
-    // Networking and privileges
     "--privileged",
-    "--net=host",
-    "--ipc=host"
-
-    // Typically 'restart: always' is not used for dev containers, so omit it here
+    "--net=host"
   ],
-
-  // For VS Code customizations
   "customizations": {
     "vscode": {
       "extensions": [
@@ -46,9 +27,6 @@
     }
   },
 
-  // Same workspace folder as before
-  "workspaceFolder": "/workspaces/src/hailo_tappas_ros2",
-
-  // Keep the same overrideCommand settings if needed
-  "overrideCommand": false
+  "workspaceMount": "source=${localWorkspaceFolder},target=/${localWorkspaceFolderBasename},type=bind",
+  "workspaceFolder": "/${localWorkspaceFolderBasename}"
 }

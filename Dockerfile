@@ -41,9 +41,6 @@ RUN apt-get update && apt-get install -y python3-venv meson python3-picamera2 su
 # Dependencies for vision_msgs
 RUN apt-get update && apt-get install -y cppcheck
 
-# Supervisor
-RUN apt-get install -y supervisor vim
-
 # Download Raspberry Pi examples
 RUN git clone --depth 1 https://github.com/raspberrypi/rpicam-apps.git
 
@@ -72,14 +69,12 @@ RUN cd / && git clone https://github.com/kyrikakis/hailo-apps-infra.git && \
     mv .git/config.tmp .git/config && \
     pip install -v -e . --break-system-packages
 
-RUN mkdir -p /workspaces/src/hailo_tappas_ros2/
-COPY . /workspaces/src/hailo_tappas_ros2/
-RUN cp /workspaces/src/hailo_tappas_ros2/supervisor/hailo.conf /etc/supervisor/conf.d/
-
 # Install requirements
-RUN cd /workspaces/src/hailo_tappas_ros2 && \
-    pip install -r requirements.txt --break-system-packages && \
-    ./download_resources.sh
+COPY requirements.txt /tmp/requirements.txt
+COPY download_resources.sh /tmp/download_resources.sh
+RUN pip install -r /tmp/requirements.txt --break-system-packages && \
+    chmod +x /tmp/download_resources.sh && \
+    /tmp/download_resources.sh
 
 # Build project
 RUN source /opt/ros/jazzy/setup.bash && \
@@ -99,5 +94,5 @@ ENTRYPOINT ["/ros_entrypoint.sh"]
 USER $USERNAME
 # terminal colors with xterm
 ENV TERM xterm
-WORKDIR /workspaces/src/hailo_tappas_ros2
+WORKDIR /workspaces/src
 CMD ["/bin/sh", "-c", "bash"]

@@ -14,3 +14,4 @@ hailo_face_recognition/hailo_face_recognition/resources/face_recognition_local_g
 hailo_face_recognition/hailo_face_recognition/resources/local_gallery.json
 hailo_common/hailo_common/__pycache__/
 hailo_common/test/__pycache__/
+resources/

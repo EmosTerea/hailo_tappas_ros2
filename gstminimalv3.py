@@ -68,7 +68,7 @@ videoconvert !
 videoscale method=0 add-borders=true !
 video/x-raw,format=RGB,width=640,height=640,framerate=30/1 !
 queue name=q3 max-size-buffers=2 leaky=downstream max-size-bytes=0 max-size-time=0 !
-hailonet hef-path=yolov8m.hef
+hailonet hef-path=resources/yolov8m.hef
     scheduling-algorithm=1
     vdevice_group_id=1
     batch-size=1
