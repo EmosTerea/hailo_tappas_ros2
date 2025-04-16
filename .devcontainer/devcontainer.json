@@ -10,7 +10,8 @@
     "-v", "/lib/firmware:/lib/firmware",
     "-v", "/run/udev:/run/udev:ro",
     "--privileged",
-    "--net=host"
+    "--network", "host",
+    "--ipc", "host"
   ],
   "customizations": {
     "vscode": {
