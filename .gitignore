@@ -1,5 +1,8 @@
 hailort.log
+*.log
 gstshark*
+*.onnx
+*.pt
 core
 hailo_face_recognition/hailo_face_recognition/__pycache__/
 hailo_face_recognition/test/__pycache__/
@@ -15,3 +18,4 @@ hailo_face_recognition/hailo_face_recognition/resources/local_gallery.json
 hailo_common/hailo_common/__pycache__/
 hailo_common/test/__pycache__/
 resources/
+venv/

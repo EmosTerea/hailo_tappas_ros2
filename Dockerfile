@@ -44,7 +44,7 @@ RUN apt-get update && apt-get install -y cppcheck
 # Download Raspberry Pi examples
 RUN git clone --depth 1 https://github.com/raspberrypi/rpicam-apps.git
 
-RUN echo "export ROS_DOMAIN_ID=20" >> ~/.bashrc && \
+RUN echo "export ROS_DOMAIN_ID=0" >> ~/.bashrc && \
     echo "source /opt/ros/$ROS_DISTRO/setup.bash" >> ~/.bashrc && \
     echo "source /workspaces/install/setup.bash" >> ~/.bashrc && \
     echo "export TAPPAS_POST_PROC_DIR=$(pkg-config --variable=tappas_postproc_lib_dir hailo-tappas-core)" >> ~/.bashrc
