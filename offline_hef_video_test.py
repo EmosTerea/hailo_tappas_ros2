@@ -70,13 +70,16 @@ class OfflineHefVideoTest:
         labels: Optional[List[str]] = None,
         nms_score: float = 0.3,
         nms_iou: float = 0.45,
+        labels_mode: str = "custom",
     ) -> None:
         self.input_path = input_path
         self.hef_path = hef_path
         self.output_dir = output_dir
         self.width = int(width)
         self.height = int(height)
-        self.labels = labels or CUSTOM_LABELS
+        self.labels_mode = labels_mode  # "custom" or "standard"
+        self.prefer_plugin_labels = self.labels_mode == "standard"
+        self.labels = (labels or CUSTOM_LABELS) if self.labels_mode == "custom" else []
         self.nms_score = float(nms_score)
         self.nms_iou = float(nms_iou)
 
@@ -92,6 +95,9 @@ class OfflineHefVideoTest:
         Gst.init(None)
 
         # Try decodebin to handle MP4 variants; we convert to RGB and letterbox to 640x640
+        # When using "standard" labels, we omit the hailofilter config-path so the plugin
+        # provides its default label set (e.g., COCO for YOLO models).
+        cfg_line = "" if self.prefer_plugin_labels else "config-path=resources/labels_custom.json"
         pipeline_desc = f"""
             filesrc location={self.input_path} !
             decodebin !
@@ -108,7 +114,7 @@ class OfflineHefVideoTest:
                      output-format-type=HAILO_FORMAT_TYPE_FLOAT32 !
             queue max-size-buffers=2 leaky=downstream !
             hailofilter so-path=/hailo-apps-infra/resources/libyolo_hailortpp_postprocess.so
-                        config-path=resources/labels_custom.json
+                        {cfg_line}
                         function-name=filter_letterbox !
             queue max-size-buffers=2 leaky=downstream !
             identity name=identity_cb !
@@ -147,13 +153,26 @@ class OfflineHefVideoTest:
         w = int(structure.get_value("width"))
         h = int(structure.get_value("height"))
 
-        # FPS if provided by caps
+        # FPS if provided by caps (be tolerant to ranges/lists)
         if structure.has_field("framerate"):
-            frac = structure.get_value("framerate")
+            # Try the typed getter first; on most builds returns (num, denom)
             try:
-                self.writer_fps = float(frac.numerator) / float(frac.denominator)
-            except Exception:  # pragma: no cover - defensive
-                self.writer_fps = 30.0
+                num, denom = structure.get_fraction("framerate")
+                if denom:
+                    self.writer_fps = float(num) / float(denom)
+            except Exception:
+                # Fall back to duck-typing of get_value output which may be
+                # a fraction-like object or simple tuple; ignore ranges/lists.
+                try:
+                    val = structure.get_value("framerate")
+                    num = getattr(val, "numerator", getattr(val, "num", None))
+                    den = getattr(val, "denominator", getattr(val, "denom", None))
+                    if num is None and isinstance(val, tuple) and len(val) == 2:
+                        num, den = val
+                    if num is not None and den:
+                        self.writer_fps = float(num) / float(den)
+                except Exception:
+                    pass  # keep default
 
         os.makedirs(self.output_dir, exist_ok=True)
         out_path = os.path.join(self.output_dir, "best_annotated.avi")
@@ -169,6 +188,12 @@ class OfflineHefVideoTest:
 
     def _label_from_detection(self, det: hailo.HailoObject) -> str:
         # Try to derive label from class id if available, fallback to det.get_label()
+        if self.prefer_plugin_labels:
+            try:
+                return det.get_label()  # type: ignore[attr-defined]
+            except Exception:
+                return "unknown"
+
         label: Optional[str] = None
         class_id: Optional[int] = None
         # Many Hailo detection objects expose get_label_id(); we guard to be safe
@@ -223,14 +248,29 @@ class OfflineHefVideoTest:
             frame_rgb = np.frombuffer(map_info.data, dtype=np.uint8).reshape((h, w, 3))
             frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
 
-            # Draw detections
+            # Draw detections (Hailo bbox coordinates are normalized [0,1])
             for det in detections:
                 try:
                     bbox = det.get_bbox()
-                    x_min = int(bbox.xmin())
-                    y_min = int(bbox.ymin())
-                    x_max = int(bbox.xmax()) if hasattr(bbox, "xmax") else int(bbox.xmin() + bbox.width())
-                    y_max = int(bbox.ymax()) if hasattr(bbox, "ymax") else int(bbox.ymin() + bbox.height())
+                    # Normalize to pixel coordinates
+                    bxmin = float(bbox.xmin())
+                    bymin = float(bbox.ymin())
+                    if hasattr(bbox, "xmax") and hasattr(bbox, "ymax"):
+                        bxmax = float(bbox.xmax())
+                        bymax = float(bbox.ymax())
+                    else:
+                        bxmax = bxmin + float(bbox.width())
+                        bymax = bymin + float(bbox.height())
+
+                    # Scale to the current frame size
+                    x_min = int(np.clip(round(bxmin * w), 0, w - 1))
+                    y_min = int(np.clip(round(bymin * h), 0, h - 1))
+                    x_max = int(np.clip(round(bxmax * w), 0, w - 1))
+                    y_max = int(np.clip(round(bymax * h), 0, h - 1))
+
+                    # Skip degenerate boxes
+                    if x_max <= x_min or y_max <= y_min:
+                        continue
 
                     conf = float(det.get_confidence()) if hasattr(det, "get_confidence") else 0.0
                     label = self._label_from_detection(det)
@@ -342,6 +382,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         default=None,
         help="Optional JSON file with label list (overrides built-in list)",
     )
+    p.add_argument(
+        "--labels-mode",
+        choices=["custom", "standard"],
+        default="custom",
+        help="Use 'standard' to rely on plugin-provided labels (e.g., COCO); 'custom' uses built-in or --labels-json.",
+    )
     return p.parse_args(argv)
 
 
@@ -349,7 +395,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     args = parse_args(argv)
 
     labels: Optional[List[str]] = None
-    if args.labels_json:
+    if args.labels_mode == "custom" and args.labels_json:
         try:
             with open(args.labels_json, "r", encoding="utf-8") as f:
                 labels = json.load(f)
@@ -368,6 +414,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         labels=labels,
         nms_score=args.nms_score,
         nms_iou=args.nms_iou,
+        labels_mode=args.labels_mode,
     )
     runner.run()
 
