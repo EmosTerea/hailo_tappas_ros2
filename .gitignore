@@ -19,3 +19,4 @@ hailo_common/hailo_common/__pycache__/
 hailo_common/test/__pycache__/
 resources/
 venv/
+hailo_model_converter
