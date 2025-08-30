@@ -20,3 +20,5 @@ hailo_common/test/__pycache__/
 resources/
 venv/
 hailo_model_converter
+*.pyc
+*/outputs/

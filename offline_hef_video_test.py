@@ -89,6 +89,10 @@ class OfflineHefVideoTest:
         self.writer: Optional[cv2.VideoWriter] = None
         self.writer_fps: float = 30.0
         self.summary = Summary()
+        # Image mode detection & state
+        self.is_image: bool = self._looks_like_image(self.input_path)
+        self.saved_image: bool = False
+        self.image_out_path: str = os.path.join(self.output_dir, "best_annotated.jpg")
 
     # --------------- Pipeline setup ---------------
     def build_pipeline(self) -> None:
@@ -97,7 +101,21 @@ class OfflineHefVideoTest:
         # Try decodebin to handle MP4 variants; we convert to RGB and letterbox to 640x640
         # When using "standard" labels, we omit the hailofilter config-path so the plugin
         # provides its default label set (e.g., COCO for YOLO models).
-        cfg_line = "" if self.prefer_plugin_labels else "config-path=resources/labels_custom.json"
+        cfg_line = (
+            ""
+            if self.prefer_plugin_labels
+            else "config-path=resources/labels_custom.json"
+        )
+        # Add hailonet NMS properties only when using standard labels, which
+        # we treat as an indicator that the HEF likely contains an on-chip NMS
+        # stage (e.g., Hailo model-zoo YOLOs). For custom HEFs without NMS,
+        # requesting these properties causes a runtime error. In that case,
+        # rely on the hailofilter CPU postprocess for NMS.
+        nms_props = (
+            f"nms-score-threshold={self.nms_score}\n                     nms-iou-threshold={self.nms_iou}\n                     "
+            if self.prefer_plugin_labels
+            else ""
+        )
         pipeline_desc = f"""
             filesrc location={self.input_path} !
             decodebin !
@@ -109,9 +127,7 @@ class OfflineHefVideoTest:
                      scheduling-algorithm=1
                      vdevice_group_id=1
                      batch-size=1
-                     nms-score-threshold={self.nms_score}
-                     nms-iou-threshold={self.nms_iou}
-                     output-format-type=HAILO_FORMAT_TYPE_FLOAT32 !
+                     {nms_props}output-format-type=HAILO_FORMAT_TYPE_FLOAT32 !
             queue max-size-buffers=2 leaky=downstream !
             hailofilter so-path=/hailo-apps-infra/resources/libyolo_hailortpp_postprocess.so
                         {cfg_line}
@@ -147,6 +163,10 @@ class OfflineHefVideoTest:
     # --------------- Probing & drawing ---------------
     def _ensure_writer(self, caps: Gst.Caps) -> None:
         if self.writer is not None:
+            return
+
+        # In single-image mode we do not open a VideoWriter.
+        if self.is_image:
             return
 
         structure = caps.get_structure(0)
@@ -272,10 +292,16 @@ class OfflineHefVideoTest:
                     if x_max <= x_min or y_max <= y_min:
                         continue
 
-                    conf = float(det.get_confidence()) if hasattr(det, "get_confidence") else 0.0
+                    conf = (
+                        float(det.get_confidence())
+                        if hasattr(det, "get_confidence")
+                        else 0.0
+                    )
                     label = self._label_from_detection(det)
 
-                    cv2.rectangle(frame_bgr, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2)
+                    cv2.rectangle(
+                        frame_bgr, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2
+                    )
                     cv2.putText(
                         frame_bgr,
                         f"{label}:{conf:.2f}",
@@ -292,9 +318,22 @@ class OfflineHefVideoTest:
                     # Be robust to any single detection failure
                     continue
 
+            # Save per input type
             if self.writer is not None:
+                # Video path: stream frames to writer
                 self.writer.write(frame_bgr)
-                self.summary.frames_processed += 1
+            elif self.is_image and not self.saved_image:
+                # Image path: save a single annotated JPEG
+                os.makedirs(self.output_dir, exist_ok=True)
+                try:
+                    cv2.imwrite(self.image_out_path, frame_bgr)
+                    print(f"[INFO] Wrote annotated image to: {self.image_out_path}")
+                    self.saved_image = True
+                except Exception as e:  # pylint: disable=broad-except
+                    print(f"[ERROR] Failed to save annotated image: {e}")
+
+            # Count frames processed regardless of output mode
+            self.summary.frames_processed += 1
         finally:
             buf.unmap(map_info)
 
@@ -325,6 +364,9 @@ class OfflineHefVideoTest:
 
         self.pipeline.set_state(Gst.State.PLAYING)
         self.mainloop = GLib.MainLoop()
+
+        if self.is_image:
+            print("[INFO] Detected image input; will save an annotated JPG.")
 
         # Allow Ctrl+C to stop the mainloop gracefully
         def _sigint_handler(signum, frame):  # noqa: ARG001
@@ -367,14 +409,27 @@ class OfflineHefVideoTest:
             except Exception:
                 pass
 
+    @staticmethod
+    def _looks_like_image(path: str) -> bool:
+        ext = os.path.splitext(path)[1].lower()
+        return ext in {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
+
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Offline HEF-on-video test using Hailo GStreamer")
-    p.add_argument("--input", default="resources/face_recognition.mp4", help="Input MP4 path")
+    p = argparse.ArgumentParser(
+        description="Offline HEF-on-video or single-image test using Hailo GStreamer"
+    )
+    p.add_argument(
+        "--input",
+        default="resources/face_recognition.mp4",
+        help="Input media path (MP4 video or single image: jpg/png/bmp)",
+    )
     p.add_argument("--hef", default="resources/best.hef", help="HEF model path")
     p.add_argument("--outdir", default="outputs", help="Directory to write outputs")
     p.add_argument("--width", type=int, default=640, help="Resize width for inference")
-    p.add_argument("--height", type=int, default=640, help="Resize height for inference")
+    p.add_argument(
+        "--height", type=int, default=640, help="Resize height for inference"
+    )
     p.add_argument("--nms-score", type=float, default=0.3, help="NMS score threshold")
     p.add_argument("--nms-iou", type=float, default=0.45, help="NMS IoU threshold")
     p.add_argument(
@@ -399,8 +454,12 @@ def main(argv: Optional[List[str]] = None) -> None:
         try:
             with open(args.labels_json, "r", encoding="utf-8") as f:
                 labels = json.load(f)
-            if not isinstance(labels, list) or not all(isinstance(x, str) for x in labels):
-                print("[WARN] labels-json must be a list of strings; falling back to defaults")
+            if not isinstance(labels, list) or not all(
+                isinstance(x, str) for x in labels
+            ):
+                print(
+                    "[WARN] labels-json must be a list of strings; falling back to defaults"
+                )
                 labels = None
         except Exception as e:  # pylint: disable=broad-except
             print(f"[WARN] Could not load labels JSON: {e}; using defaults")
