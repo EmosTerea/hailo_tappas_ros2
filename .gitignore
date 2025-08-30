@@ -21,4 +21,4 @@ resources/
 venv/
 hailo_model_converter
 *.pyc
-*/outputs/
+*outputs/
