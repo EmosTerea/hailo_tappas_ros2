@@ -93,6 +93,8 @@ class OfflineHefVideoTest:
         self.is_image: bool = self._looks_like_image(self.input_path)
         self.saved_image: bool = False
         self.image_out_path: str = os.path.join(self.output_dir, "best_annotated.jpg")
+        self.orig_image_bgr: Optional[np.ndarray] = None
+        self._stop_scheduled: bool = False
 
     # --------------- Pipeline setup ---------------
     def build_pipeline(self) -> None:
@@ -116,9 +118,11 @@ class OfflineHefVideoTest:
             if self.prefer_plugin_labels
             else ""
         )
+        freeze = "imagefreeze !" if self.is_image else ""
         pipeline_desc = f"""
             filesrc location={self.input_path} !
             decodebin !
+            {freeze}
             videoconvert !
             videoscale method=0 add-borders=true !
             video/x-raw,format=RGB,width={self.width},height={self.height} !
@@ -252,13 +256,19 @@ class OfflineHefVideoTest:
 
         # Prepare frame extraction
         caps = pad.get_current_caps()
-        if caps is None:
-            return Gst.PadProbeReturn.OK
-
-        self._ensure_writer(caps)
-        structure = caps.get_structure(0)
-        w = int(structure.get_value("width"))
-        h = int(structure.get_value("height"))
+        if caps is not None:
+            # Only needed for video path; image path doesn't use writer
+            self._ensure_writer(caps)
+            try:
+                structure = caps.get_structure(0)
+                w = int(structure.get_value("width"))
+                h = int(structure.get_value("height"))
+            except Exception:
+                w, h = self.width, self.height
+        else:
+            # Some sources (single images) may not expose caps on first/only buffer
+            # Fall back to the configured network size (post-videoscale)
+            w, h = self.width, self.height
 
         success, map_info = buf.map(Gst.MapFlags.READ)
         if not success:
@@ -326,9 +336,40 @@ class OfflineHefVideoTest:
                 # Image path: save a single annotated JPEG
                 os.makedirs(self.output_dir, exist_ok=True)
                 try:
-                    cv2.imwrite(self.image_out_path, frame_bgr)
+                    # If we have the original image, remove letterbox and resize back
+                    save_frame = frame_bgr
+                    if self.orig_image_bgr is not None:
+                        src_h, src_w = self.orig_image_bgr.shape[:2]
+                        # Compute letterbox mapping parameters used by videoscale add-borders=true
+                        scale = min(w / float(src_w), h / float(src_h))
+                        new_w = int(round(scale * src_w))
+                        new_h = int(round(scale * src_h))
+                        pad_x = int(round((w - new_w) / 2.0))
+                        pad_y = int(round((h - new_h) / 2.0))
+                        x0 = max(0, min(pad_x, w - 1))
+                        y0 = max(0, min(pad_y, h - 1))
+                        x1 = max(x0 + 1, min(x0 + new_w, w))
+                        y1 = max(y0 + 1, min(y0 + new_h, h))
+                        roi = frame_bgr[y0:y1, x0:x1]
+                        try:
+                            save_frame = cv2.resize(roi, (src_w, src_h), interpolation=cv2.INTER_LINEAR)
+                        except Exception:
+                            save_frame = frame_bgr
+                    cv2.imwrite(self.image_out_path, save_frame)
                     print(f"[INFO] Wrote annotated image to: {self.image_out_path}")
                     self.saved_image = True
+                    # Schedule stop from the main loop to avoid state changes
+                    # from the streaming thread (prevents GStreamer warnings).
+                    if not self._stop_scheduled:
+                        self._stop_scheduled = True
+                        try:
+                            GLib.idle_add(self._idle_stop)
+                        except Exception:
+                            # Fallback: post EOS, handled by bus message callback
+                            try:
+                                self.pipeline.send_event(Gst.Event.new_eos())  # type: ignore[union-attr]
+                            except Exception:
+                                pass
                 except Exception as e:  # pylint: disable=broad-except
                     print(f"[ERROR] Failed to save annotated image: {e}")
 
@@ -367,6 +408,15 @@ class OfflineHefVideoTest:
 
         if self.is_image:
             print("[INFO] Detected image input; will save an annotated JPG.")
+            # Load original image to preserve native resolution for annotation
+            try:
+                self.orig_image_bgr = cv2.imread(self.input_path, cv2.IMREAD_COLOR)
+                if self.orig_image_bgr is None:
+                    print(
+                        f"[WARN] Could not read original image '{self.input_path}'. Will annotate resized frame."
+                    )
+            except Exception as e:
+                print(f"[WARN] Failed to load original image: {e}")
 
         # Allow Ctrl+C to stop the mainloop gracefully
         def _sigint_handler(signum, frame):  # noqa: ARG001
@@ -408,6 +458,14 @@ class OfflineHefVideoTest:
                 self.writer.release()
             except Exception:
                 pass
+
+    # Ensure state changes happen on the main loop thread
+    def _idle_stop(self) -> bool:
+        try:
+            self.stop()
+        finally:
+            # Returning False removes this idle source
+            return False
 
     @staticmethod
     def _looks_like_image(path: str) -> bool:
