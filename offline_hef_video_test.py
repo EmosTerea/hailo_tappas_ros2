@@ -71,6 +71,8 @@ class OfflineHefVideoTest:
         nms_score: float = 0.3,
         nms_iou: float = 0.45,
         labels_mode: str = "custom",
+        plugin_nms: bool = False,
+        normalize_input: bool = False,
     ) -> None:
         self.input_path = input_path
         self.hef_path = hef_path
@@ -82,6 +84,12 @@ class OfflineHefVideoTest:
         self.labels = (labels or CUSTOM_LABELS) if self.labels_mode == "custom" else []
         self.nms_score = float(nms_score)
         self.nms_iou = float(nms_iou)
+        # Only set hailonet NMS properties when explicitly requested and
+        # when using plugin-provided postprocess. Many custom HEFs do not
+        # include NMS outputs; passing these props causes CHECK_SUCCESS=6.
+        self.plugin_nms = bool(plugin_nms and self.prefer_plugin_labels)
+        # Debug knob: normalize frames to [0,1] float32 before hailonet
+        self.normalize_input = bool(normalize_input)
 
         self.pipeline: Optional[Gst.Element] = None
         self.mainloop: Optional[GLib.MainLoop] = None
@@ -103,48 +111,122 @@ class OfflineHefVideoTest:
         # Try decodebin to handle MP4 variants; we convert to RGB and letterbox to 640x640
         # When using "standard" labels, we omit the hailofilter config-path so the plugin
         # provides its default label set (e.g., COCO for YOLO models).
+        # Configure postprocess and optional config JSON
         cfg_line = (
             ""
             if self.prefer_plugin_labels
             else "config-path=resources/labels_custom.json"
         )
-        # Add hailonet NMS properties only when using standard labels, which
-        # we treat as an indicator that the HEF likely contains an on-chip NMS
-        # stage (e.g., Hailo model-zoo YOLOs). For custom HEFs without NMS,
-        # requesting these properties causes a runtime error. In that case,
-        # rely on the hailofilter CPU postprocess for NMS.
+        # Optional NMS properties (only when explicitly requested and in standard mode)
         nms_props = (
-            f"nms-score-threshold={self.nms_score}\n                     nms-iou-threshold={self.nms_iou}\n                     "
-            if self.prefer_plugin_labels
+            f"nms-score-threshold={self.nms_score} nms-iou-threshold={self.nms_iou} "
+            if self.plugin_nms
             else ""
         )
         freeze = "imagefreeze !" if self.is_image else ""
-        pipeline_desc = f"""
-            filesrc location={self.input_path} !
-            decodebin !
-            {freeze}
-            videoconvert !
-            videoscale method=0 add-borders=true !
-            video/x-raw,format=RGB,width={self.width},height={self.height} !
-            queue max-size-buffers=2 leaky=downstream !
-            hailonet hef-path={self.hef_path}
-                     scheduling-algorithm=1
-                     vdevice_group_id=1
-                     batch-size=1
-                     {nms_props}output-format-type=HAILO_FORMAT_TYPE_FLOAT32 !
-            queue max-size-buffers=2 leaky=downstream !
-            hailofilter so-path=/hailo-apps-infra/resources/libyolo_hailortpp_postprocess.so
-                        {cfg_line}
-                        function-name=filter_letterbox !
-            queue max-size-buffers=2 leaky=downstream !
-            identity name=identity_cb !
-            fakesink sync=false
-        """
 
-        try:
-            self.pipeline = Gst.parse_launch(pipeline_desc)
-        except Exception as e:  # pylint: disable=broad-except
-            print(f"[ERROR] Failed to create pipeline: {e}")
+        # When normalize_input is enabled, convert frames to RGBF32 and divide by 255
+        # in a pad-probe (pre_norm_cb) before hailonet. Also ask hailonet to accept
+        # float32 input so HailoRT quantizes according to calibration ranges.
+        if self.normalize_input:
+            pre_path = f"""
+                videoconvert !
+                video/x-raw,format=RGB !
+                videoscale method=0 add-borders=true !
+                video/x-raw,width={self.width},height={self.height},format=RGB !
+                videoconvert !
+                video/x-raw,format=RGBF32 !
+                queue max-size-buffers=2 leaky=downstream !
+                identity name=pre_norm_cb !
+            """
+            hailonet_extra = "input-format-type=HAILO_FORMAT_TYPE_FLOAT32"
+        else:
+            pre_path = f"""
+                videoconvert !
+                videoscale method=0 add-borders=true !
+                video/x-raw,format=RGB,width={self.width},height={self.height} !
+                queue max-size-buffers=2 leaky=downstream !
+            """
+            hailonet_extra = ""
+
+        # Choose postprocess library + function
+        # Standard: TAPPAS YOLO postprocess on device tensors
+        # Custom: keep legacy filter_letterbox path
+        if self.prefer_plugin_labels:
+            post_so_candidates = [
+                "/usr/lib/aarch64-linux-gnu/hailo/tappas/post_processes/libyolo_hailortpp_post.so",
+                "/usr/lib/x86_64-linux-gnu/hailo/tappas/post_processes/libyolo_hailortpp_post.so",
+                "/hailo-apps-infra/resources/libyolo_hailortpp_postprocess.so",
+            ]
+            post_fn = "yolov8"
+        else:
+            post_so_candidates = [
+                "/hailo-apps-infra/resources/libyolo_hailortpp_postprocess.so",
+                "/usr/lib/aarch64-linux-gnu/hailo/tappas/post_processes/libyolo_hailortpp_post.so",
+                "/usr/lib/x86_64-linux-gnu/hailo/tappas/post_processes/libyolo_hailortpp_post.so",
+            ]
+            post_fn = "filter_letterbox"
+
+        # Pick the first existing .so path
+        post_so = None
+        for cand in post_so_candidates:
+            try:
+                if os.path.isfile(cand):
+                    post_so = cand
+                    break
+            except Exception:
+                continue
+        if post_so is None:
+            # Fallback to first candidate; pipeline creation may fail, but error will be clear
+            post_so = post_so_candidates[0]
+
+        # Try to build pipeline with a list of function-name candidates
+        fn_candidates = (
+            ["yolov8", "yolov5", "yolo", "yolov5_letterbox", "yolov8_letterbox"]
+            if self.prefer_plugin_labels
+            else [post_fn]
+        )
+        last_error: Optional[Exception] = None
+        for fn in fn_candidates:
+            pipeline_desc = f"""
+                filesrc location={self.input_path} !
+                decodebin !
+                {freeze}
+                {pre_path}
+                hailonet hef-path={self.hef_path}
+                         scheduling-algorithm=1
+                         vdevice_group_id=1
+                         batch-size=1
+                         {hailonet_extra}
+                         {nms_props}output-format-type=HAILO_FORMAT_TYPE_FLOAT32 !
+                queue max-size-buffers=2 leaky=downstream !
+                hailofilter so-path={post_so}
+                            {cfg_line}
+                            function-name={fn} !
+                queue max-size-buffers=2 leaky=downstream !
+                identity name=identity_cb !
+                fakesink sync=false
+            """
+            try:
+                self.pipeline = Gst.parse_launch(pipeline_desc)
+                print(f"[INFO] Using postprocess function-name='{fn}' from '{post_so}'")
+                last_error = None
+                break
+            except Exception as e:  # pylint: disable=broad-except
+                last_error = e
+                continue
+        if self.pipeline is None:
+            print(
+                "[ERROR] Failed to create pipeline with available yolov* postprocess functions."
+            )
+            if last_error is not None:
+                print(f"[HINT] Last error: {last_error}")
+            print(
+                "[HINT] Ensure TAPPAS post-process library is installed and exports yolov8/yolov5."
+            )
+            print(
+                "[HINT] On RPi: sudo apt install hailo-tappas-post-processes or update to TAPPAS >= 4.28."
+            )
             sys.exit(1)
 
         identity = self.pipeline.get_by_name("identity_cb")
@@ -158,6 +240,20 @@ class OfflineHefVideoTest:
             sys.exit(1)
 
         srcpad.add_probe(Gst.PadProbeType.BUFFER, self.on_buffer)
+
+        # Attach pre-normalization probe if requested
+        if self.normalize_input:
+            pre_identity = self.pipeline.get_by_name("pre_norm_cb")
+            if pre_identity is None:
+                print(
+                    "[ERROR] pre_norm_cb element not found in pipeline (normalize_input)"
+                )
+                sys.exit(1)
+            pre_srcpad = pre_identity.get_static_pad("src")
+            if pre_srcpad is None:
+                print("[ERROR] Could not get src pad from pre_norm_cb")
+                sys.exit(1)
+            pre_srcpad.add_probe(Gst.PadProbeType.BUFFER, self._pre_norm_buffer)
 
         # Handle bus messages
         bus = self.pipeline.get_bus()
@@ -208,7 +304,9 @@ class OfflineHefVideoTest:
             print("[ERROR] Failed to open VideoWriter for output.")
             sys.exit(1)
 
-        print(f"[INFO] Writing annotated video to: {out_path} @ {self.writer_fps:.2f} FPS")
+        print(
+            f"[INFO] Writing annotated video to: {out_path} @ {self.writer_fps:.2f} FPS"
+        )
 
     def _label_from_detection(self, det: hailo.HailoObject) -> str:
         # Try to derive label from class id if available, fallback to det.get_label()
@@ -352,7 +450,9 @@ class OfflineHefVideoTest:
                         y1 = max(y0 + 1, min(y0 + new_h, h))
                         roi = frame_bgr[y0:y1, x0:x1]
                         try:
-                            save_frame = cv2.resize(roi, (src_w, src_h), interpolation=cv2.INTER_LINEAR)
+                            save_frame = cv2.resize(
+                                roi, (src_w, src_h), interpolation=cv2.INTER_LINEAR
+                            )
                         except Exception:
                             save_frame = frame_bgr
                     cv2.imwrite(self.image_out_path, save_frame)
@@ -391,6 +491,33 @@ class OfflineHefVideoTest:
             print(f"[ERROR] {err} | debug: {debug}")
             self.stop()
         return True
+
+    def _pre_norm_buffer(self, pad: Gst.Pad, info: Gst.PadProbeInfo):  # type: ignore[override]
+        """Divide RGBF32 pixels by 255 in-place before hailonet (debug-only)."""
+        buf = info.get_buffer()
+        if buf is None:
+            return Gst.PadProbeReturn.OK
+        success, map_info = buf.map(Gst.MapFlags.READ | Gst.MapFlags.WRITE)
+        if not success:
+            return Gst.PadProbeReturn.OK
+        try:
+            caps = pad.get_current_caps()
+            if caps is not None:
+                s = caps.get_structure(0)
+                w = int(s.get_value("width"))
+                h = int(s.get_value("height"))
+            else:
+                w, h = self.width, self.height
+            # Expect RGBF32 interleaved; divide in-place
+            arr = np.frombuffer(map_info.data, dtype=np.float32)
+            if arr.size != w * h * 3:
+                return Gst.PadProbeReturn.OK
+            arr /= 255.0
+        except Exception:
+            pass
+        finally:
+            buf.unmap(map_info)
+        return Gst.PadProbeReturn.OK
 
     def run(self) -> None:
         if not os.path.isfile(self.input_path):
@@ -491,6 +618,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument("--nms-score", type=float, default=0.3, help="NMS score threshold")
     p.add_argument("--nms-iou", type=float, default=0.45, help="NMS IoU threshold")
     p.add_argument(
+        "--plugin-nms",
+        action="store_true",
+        help="Enable hailonet NMS properties (only for HEFs with on-chip NMS).",
+    )
+    p.add_argument(
         "--labels-json",
         default=None,
         help="Optional JSON file with label list (overrides built-in list)",
@@ -500,6 +632,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         choices=["custom", "standard"],
         default="custom",
         help="Use 'standard' to rely on plugin-provided labels (e.g., COCO); 'custom' uses built-in or --labels-json.",
+    )
+    p.add_argument(
+        "--normalize-input",
+        action="store_true",
+        help="Debug: convert frames to RGBF32 and divide by 255 before hailonet; also set hailonet input-format-type=FLOAT32.",
     )
     return p.parse_args(argv)
 
@@ -532,6 +669,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         nms_score=args.nms_score,
         nms_iou=args.nms_iou,
         labels_mode=args.labels_mode,
+        plugin_nms=args.plugin_nms,
+        normalize_input=args.normalize_input,
     )
     runner.run()
 
