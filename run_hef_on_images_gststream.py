@@ -38,6 +38,7 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import cv2  # type: ignore
 import numpy as np  # type: ignore
+import subprocess
 
 # GStreamer / Hailo
 import gi  # type: ignore
@@ -108,6 +109,35 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--letterbox-pad", type=int, default=114, help="Pad value for letterbox (0-255)"
+    )
+    # GStreamer / robustness controls
+    p.add_argument(
+        "--no-filter",
+        action="store_true",
+        help="Omit hailofilter postprocess element; push through hailonet only",
+    )
+    p.add_argument(
+        "--filter-func",
+        type=str,
+        default="filter_letterbox",
+        help="hailofilter function-name to use when filter is enabled",
+    )
+    p.add_argument(
+        "--filter-so",
+        type=str,
+        default="/hailo-apps-infra/resources/libyolo_hailortpp_postprocess.so",
+        help="Path to hailofilter post-process .so",
+    )
+    p.add_argument(
+        "--single-image",
+        type=Path,
+        default=None,
+        help="Run on this exact image path (overrides --images-dir/random pick)",
+    )
+    p.add_argument(
+        "--isolate-per-image",
+        action="store_true",
+        help="Spawn a fresh subprocess per image (crash isolation)",
     )
 
     # Optional YOLOv8 decode (DFL)
@@ -285,6 +315,7 @@ class GstHefRunner:
         self.in_h, self.in_w, self.in_c = map(int, in_shape_hwc)
         self.input_float = bool(input_float)
         self.output_float = bool(output_float)
+        self.use_filter: bool = True
 
         self.pipeline: Optional[Gst.Element] = None
         self.appsrc: Optional[Gst.Element] = None
@@ -310,15 +341,17 @@ class GstHefRunner:
             if self.output_float
             else "output-format-type=HAILO_FORMAT_TYPE_UINT8"
         )
-        # Prefer a stable postprocess that exists in this env to ensure metadata propagation.
-        post_so = "/hailo-apps-infra/resources/libyolo_hailortpp_postprocess.so"
-        use_post = os.path.isfile(post_so)
+        # Prefer a stable postprocess that exists in this env to ensure metadata propagation,
+        # unless explicitly disabled via --no-filter.
+        post_so = getattr(self, "post_so", "/hailo-apps-infra/resources/libyolo_hailortpp_postprocess.so")
+        post_fn = getattr(self, "post_fn", "filter_letterbox")
+        use_post = bool(self.use_filter and post_so and os.path.isfile(post_so))
         if use_post:
             pipeline_desc = f"""
                 appsrc name=src is-live=false format=time do-timestamp=true block=true caps=video/x-raw,format={fmt},width={self.in_w},height={self.in_h},framerate=30/1 !
                 queue max-size-buffers=8 leaky=downstream !
-                hailonet hef-path={self.hef_path} {hailo_in_ftype} {hailo_out_ftype} !
-                hailofilter so-path={post_so} function-name=filter_letterbox remove-tensors=false !
+                hailonet hef-path={self.hef_path} {hailo_in_ftype} {hailo_out_ftype} force-writable=true outputs-min-pool-size=4 outputs-max-pool-size=16 !
+                hailofilter so-path={post_so} function-name={post_fn} remove-tensors=false qos=false !
                 identity name=after_hailo !
                 fakesink sync=false
             """
@@ -326,7 +359,7 @@ class GstHefRunner:
             pipeline_desc = f"""
                 appsrc name=src is-live=false format=time do-timestamp=true block=true caps=video/x-raw,format={fmt},width={self.in_w},height={self.in_h},framerate=30/1 !
                 queue max-size-buffers=8 leaky=downstream !
-                hailonet hef-path={self.hef_path} {hailo_in_ftype} {hailo_out_ftype} !
+                hailonet hef-path={self.hef_path} {hailo_in_ftype} {hailo_out_ftype} force-writable=true outputs-min-pool-size=4 outputs-max-pool-size=16 !
                 identity name=after_hailo !
                 fakesink sync=false
             """
@@ -354,6 +387,11 @@ class GstHefRunner:
     def start(self) -> None:
         assert self.pipeline is not None
         self.pipeline.set_state(Gst.State.PLAYING)
+        # Block until the pipeline reaches PLAYING (avoid appsrc timestamp warnings/races)
+        try:
+            self.pipeline.get_state(timeout=Gst.SECOND * 3)
+        except Exception:
+            pass
         self.mainloop = GLib.MainLoop()
         self.mainloop_thread = threading.Thread(target=self.mainloop.run, daemon=True)
         self.mainloop_thread.start()
@@ -413,30 +451,38 @@ class GstHefRunner:
                     except Exception:
                         # Fallback if name() not available
                         name = getattr(t, "_name", f"tensor_{len(result)}")
-                    # Prefer dequantized float when requested
-                    # Robust conversion to numpy via raw bytes buffer
+                    # Robust conversion to numpy
                     try:
                         h = int(t.height()); w = int(t.width()); f = int(t.features())
                     except Exception:
                         h = w = f = 0
-                    # Try direct view first
-                    arr = np.array(t, copy=False)
+                    # Choose float vs uint path
+                    if self.output_float:
+                        try:
+                            arr = np.array(t.get_full_percision(), copy=False)  # type: ignore[attr-defined]
+                        except Exception:
+                            # Fallback to fixed-scale index 0
+                            try:
+                                arr = np.array(t.fix_scale(0), copy=False)  # type: ignore[attr-defined]
+                            except Exception:
+                                arr = np.array(t, copy=False)
+                    else:
+                        arr = np.array(t, copy=False)
                     if arr.ndim == 0 and h and w and f:
                         # Expensive fallback: iterate to reconstruct tensor (rare)
                         dtype = np.float32 if self.output_float else np.uint8
                         tmp = np.empty((h, w, f), dtype=dtype)
-                        try:
-                            for yy in range(h):
-                                for xx in range(w):
-                                    for cc in range(f):
-                                        try:
-                                            val = t.get(yy, xx, cc)
-                                        except Exception:
-                                            val = 0.0
-                                        tmp[yy, xx, cc] = val
-                            arr = tmp
-                        except Exception:
-                            arr = tmp
+                        for yy in range(h):
+                            for xx in range(w):
+                                for cc in range(f):
+                                    try:
+                                        val = t.get(yy, xx, cc)
+                                    except Exception:
+                                        val = 0.0
+                                    tmp[yy, xx, cc] = val
+                        arr = tmp
+                    # Ensure tensors survive after pipeline teardown by copying to our own memory
+                    arr = np.array(arr, copy=True)
                     result[name] = arr
             else:
                 # Try HAILO_MATRIX objects as raw outputs fallback
@@ -544,11 +590,17 @@ def main() -> int:
         print(f"[ERROR] Images dir not found: {args.images_dir}")
         return 2
 
-    all_images = list_images(args.images_dir)
-    if not all_images:
-        print(f"[ERROR] No images found under: {args.images_dir}")
-        return 2
-    chosen = pick_random(all_images, args.limit, args.seed)
+    if args.single_image is not None:
+        if not args.single_image.exists():
+            print(f"[ERROR] --single-image not found: {args.single_image}")
+            return 2
+        chosen = [args.single_image]
+    else:
+        all_images = list_images(args.images_dir)
+        if not all_images:
+            print(f"[ERROR] No images found under: {args.images_dir}")
+            return 2
+        chosen = pick_random(all_images, args.limit, args.seed)
     print(f"[INFO] Selected {len(chosen)} image(s) from {args.images_dir}")
     for p in chosen:
         print(f"       - {p}")
@@ -580,10 +632,58 @@ def main() -> int:
             "       Device-side quantization remains consistent with HEF calibration; outputs should be comparable."
         )
 
+    # Optional isolation mode: spawn a fresh process per image to catch native crashes
+    if args.isolate_per_image and len(chosen) > 1:
+        print("[INFO] isolate-per-image enabled; spawning a subprocess per image")
+        script = Path(__file__).resolve()
+        failures = 0
+        for i, img in enumerate(chosen):
+            sub_out = args.outdir / f"isolate_{i:03d}"
+            cmd = [
+                sys.executable,
+                str(script),
+                "--hef",
+                str(args.hef),
+                "--images-dir",
+                str(args.images_dir),
+                "--outdir",
+                str(sub_out),
+                "--single-image",
+                str(img),
+                "--letterbox" if args.letterbox else "",
+                "--letterbox-pad",
+                str(args.letterbox_pad),
+            ]
+            if args.no_filter:
+                cmd.append("--no-filter")
+            if args.input_float:
+                cmd.append("--input-float")
+            if args.output_float:
+                cmd.append("--output-float")
+            if args.normalize:
+                cmd.append("--normalize")
+            if args.decode_yolov8:
+                cmd.append("--decode-yolov8")
+            if args.yolo_classes is not None:
+                cmd += ["--yolo-classes", str(args.yolo_classes)]
+            cmd += ["--filter-so", args.filter_so, "--filter-func", args.filter_func]
+            # Remove empty strings from cmd
+            cmd = [x for x in cmd if x]
+            print(f"[INFO] Subprocess {i+1}/{len(chosen)} -> {img}")
+            ret = subprocess.run(cmd).returncode
+            if ret != 0:
+                print(f"[WARN] Subprocess failed with code {ret} for {img}")
+                failures += 1
+        print(f"[INFO] Isolation run complete. Failures: {failures}")
+        return 0 if failures == 0 else 1
+
     # Build + start pipeline
     runner = GstHefRunner(
         hef_path=args.hef, in_shape_hwc=(in_h, in_w, in_c), input_float=args.input_float, output_float=args.output_float
     )
+    runner.use_filter = not bool(args.no_filter)
+    runner.post_so = args.filter_so
+    runner.post_fn = args.filter_func
     try:
         runner.build()
         runner.start()
