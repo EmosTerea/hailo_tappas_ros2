@@ -348,6 +348,10 @@ class OfflineHefVideoTest:
         try:
             roi = hailo.get_roi_from_buffer(buf)
             detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
+            try:
+                print(f"[DBG offline] has_tensors={roi.has_tensors()} tensors={len(roi.get_tensors())}")
+            except Exception:
+                pass
         except Exception as e:  # pylint: disable=broad-except
             print(f"[WARN] Could not get Hailo detections: {e}")
             detections = []
