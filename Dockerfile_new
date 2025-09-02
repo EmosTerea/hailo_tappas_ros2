@@ -7,11 +7,14 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV LANG=en_US.UTF-8
 RUN apt-get update && apt-get install -y --no-install-recommends \
     locales ca-certificates curl wget git build-essential pkg-config \
+    software-properties-common gnupg lsb-release && \
+    add-apt-repository -y universe && \
+    apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-dev python3-venv python3-pip \
     gstreamer1.0-tools gstreamer1.0-x \
     gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav \
     libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-    python3-gi python3-gi-cairo gir1.2-gst-1.0 libgirepository1.0-dev \
+    python3-gi gir1.2-gstreamer-1.0 libgirepository1.0-dev \
     cmake meson ninja-build \
     libopencv-dev python3-opencv \
     && rm -rf /var/lib/apt/lists/* \
@@ -22,7 +25,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # ----------------------------------------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
     software-properties-common gnupg lsb-release && rm -rf /var/lib/apt/lists/*
-RUN add-apt-repository -y universe
 RUN curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
     | gpg --dearmor -o /usr/share/keyrings/ros-archive-keyring.gpg && \
     echo "deb [arch=arm64 signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu noble main" \
@@ -36,10 +38,14 @@ RUN echo "source /opt/ros/$ROS_DISTRO/setup.bash" >> /etc/bash.bashrc
 
 # ----------------------------------------------------------------------------
 # Install HailoRT 4.22.0 from provided local artifacts (place in build context)
+# Work around service management during dpkg in containers (no systemd)
 # ----------------------------------------------------------------------------
+RUN printf '#!/bin/sh\nexit 0\n' > /usr/sbin/policy-rc.d && chmod +x /usr/sbin/policy-rc.d && \
+    printf '#!/bin/sh\nexit 0\n' > /usr/bin/systemctl && chmod +x /usr/bin/systemctl
 COPY hailort_4.22.0_arm64.deb /tmp/hailo/hailort_4.22.0_arm64.deb
 RUN apt-get update && apt-get install -y --no-install-recommends \
     /tmp/hailo/hailort_4.22.0_arm64.deb && rm -rf /var/lib/apt/lists/*
+RUN ldconfig
 
 # Python wheel for HailoRT 4.22.0 (cp310)
 COPY hailort-4.22.0-cp312-cp312-linux_aarch64.whl /tmp/hailo/hailort-4.22.0-cp312-cp312-linux_aarch64.whl
