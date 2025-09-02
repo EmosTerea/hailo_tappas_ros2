@@ -1,0 +1,88 @@
+FROM --platform=linux/arm64 ubuntu:22.04
+
+SHELL ["/bin/bash", "-c"]
+
+# Locale and noninteractive
+ENV DEBIAN_FRONTEND=noninteractive
+ENV LANG=en_US.UTF-8
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    locales ca-certificates curl wget git build-essential pkg-config \
+    python3 python3-dev python3-venv python3-pip \
+    gstreamer1.0-tools gstreamer1.0-x \
+    gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav \
+    libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+    python3-gi python3-gi-cairo gir1.2-gst-1.0 libgirepository1.0-dev \
+    cmake meson ninja-build \
+    libopencv-dev python3-opencv \
+    && rm -rf /var/lib/apt/lists/* \
+    && locale-gen en_US.UTF-8
+
+# ----------------------------------------------------------------------------
+# Install ROS 2 Humble (Jammy) core + messages used by the Python node
+# ----------------------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    software-properties-common gnupg lsb-release && rm -rf /var/lib/apt/lists/*
+RUN curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.asc | apt-key add - && \
+    sh -c 'echo "deb [arch=arm64] http://packages.ros.org/ros2/ubuntu $(. /etc/os-release && echo $UBUNTU_CODENAME) main" > /etc/apt/sources.list.d/ros2.list'
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ros-humble-ros-base ros-humble-vision-msgs \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV ROS_DISTRO=humble
+RUN echo "source /opt/ros/$ROS_DISTRO/setup.bash" >> /etc/bash.bashrc
+
+# ----------------------------------------------------------------------------
+# Install HailoRT 4.22.0 from provided local artifacts (place in build context)
+# ----------------------------------------------------------------------------
+COPY hailort_4.22.0_arm64.deb /tmp/hailo/hailort_4.22.0_arm64.deb
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    /tmp/hailo/hailort_4.22.0_arm64.deb && rm -rf /var/lib/apt/lists/*
+
+# Python wheel for HailoRT 4.22.0 (cp310)
+COPY hailort-4.22.0-cp310-cp310-linux_aarch64.whl /tmp/hailo/hailort-4.22.0-cp310-cp310-linux_aarch64.whl
+RUN pip3 install --no-cache-dir /tmp/hailo/hailort-4.22.0-cp310-cp310-linux_aarch64.whl
+
+# ----------------------------------------------------------------------------
+# Build and install Hailo TAPPAS v5.0.0 + integrate PR #7
+# This installs the GStreamer Hailo elements and post-process libs
+# ----------------------------------------------------------------------------
+WORKDIR /opt/hailo
+RUN git clone https://github.com/hailo-ai/tappas.git && \
+    cd tappas && \
+    git checkout -b v5.0.0 v5.0.0 && \
+    git fetch origin pull/7/head:pr-7 && \
+    git merge --no-edit pr-7
+
+# TAPPAS install script builds the required components. Use non-interactive mode.
+RUN cd /opt/hailo/tappas && \
+    chmod +x install.sh && \
+    ./install.sh --non-interactive
+
+# Expose the standard post-process directory used by TAPPAS installs
+ENV TAPPAS_POST_PROC_DIR=/usr/lib/aarch64-linux-gnu/hailo/tappas/post_processes
+
+# ----------------------------------------------------------------------------
+# Optionally install hailo-apps-infra (latest) if needed by other scripts
+# ----------------------------------------------------------------------------
+ARG INSTALL_HAILO_APPS_INFRA=false
+RUN if [ "$INSTALL_HAILO_APPS_INFRA" = "true" ]; then \
+      pip3 install --no-cache-dir git+https://github.com/hailo-ai/hailo-apps-infra.git@main ; \
+    fi
+
+# ----------------------------------------------------------------------------
+# Project setup
+# ----------------------------------------------------------------------------
+WORKDIR /workspaces
+COPY requirements.txt /tmp/requirements.txt
+RUN pip3 install --no-cache-dir -r /tmp/requirements.txt
+
+# Copy project (adjust path if building from repo root)
+COPY . /workspaces/
+
+# Ensure ROS env and colors in shells
+RUN echo "export ROS_DOMAIN_ID=0" >> /etc/bash.bashrc
+ENV TERM xterm
+
+WORKDIR /workspaces
+CMD ["/bin/bash"]
+
