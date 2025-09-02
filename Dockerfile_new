@@ -1,4 +1,4 @@
-FROM --platform=linux/arm64 ubuntu:22.04
+FROM --platform=linux/arm64 ubuntu:24.04
 
 SHELL ["/bin/bash", "-c"]
 
@@ -22,13 +22,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # ----------------------------------------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
     software-properties-common gnupg lsb-release && rm -rf /var/lib/apt/lists/*
-RUN curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.asc | apt-key add - && \
-    sh -c 'echo "deb [arch=arm64] http://packages.ros.org/ros2/ubuntu $(. /etc/os-release && echo $UBUNTU_CODENAME) main" > /etc/apt/sources.list.d/ros2.list'
+RUN add-apt-repository -y universe
+RUN curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
+    | gpg --dearmor -o /usr/share/keyrings/ros-archive-keyring.gpg && \
+    echo "deb [arch=arm64 signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu noble main" \
+    > /etc/apt/sources.list.d/ros2.list
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ros-humble-ros-base ros-humble-vision-msgs \
+    ros-jazzy-ros-base ros-jazzy-vision-msgs \
     && rm -rf /var/lib/apt/lists/*
 
-ENV ROS_DISTRO=humble
+ENV ROS_DISTRO=jazzy
 RUN echo "source /opt/ros/$ROS_DISTRO/setup.bash" >> /etc/bash.bashrc
 
 # ----------------------------------------------------------------------------
@@ -39,8 +42,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     /tmp/hailo/hailort_4.22.0_arm64.deb && rm -rf /var/lib/apt/lists/*
 
 # Python wheel for HailoRT 4.22.0 (cp310)
-COPY hailort-4.22.0-cp310-cp310-linux_aarch64.whl /tmp/hailo/hailort-4.22.0-cp310-cp310-linux_aarch64.whl
-RUN pip3 install --no-cache-dir /tmp/hailo/hailort-4.22.0-cp310-cp310-linux_aarch64.whl
+COPY hailort-4.22.0-cp312-cp312-linux_aarch64.whl /tmp/hailo/hailort-4.22.0-cp312-cp312-linux_aarch64.whl
+RUN python3 -m pip install --no-cache-dir /tmp/hailo/hailort-4.22.0-cp312-cp312-linux_aarch64.whl
 
 # ----------------------------------------------------------------------------
 # Build and install Hailo TAPPAS v5.0.0 + integrate PR #7
@@ -62,14 +65,6 @@ RUN cd /opt/hailo/tappas && \
 ENV TAPPAS_POST_PROC_DIR=/usr/lib/aarch64-linux-gnu/hailo/tappas/post_processes
 
 # ----------------------------------------------------------------------------
-# Optionally install hailo-apps-infra (latest) if needed by other scripts
-# ----------------------------------------------------------------------------
-ARG INSTALL_HAILO_APPS_INFRA=false
-RUN if [ "$INSTALL_HAILO_APPS_INFRA" = "true" ]; then \
-      pip3 install --no-cache-dir git+https://github.com/hailo-ai/hailo-apps-infra.git@main ; \
-    fi
-
-# ----------------------------------------------------------------------------
 # Project setup
 # ----------------------------------------------------------------------------
 WORKDIR /workspaces
@@ -85,4 +80,3 @@ ENV TERM xterm
 
 WORKDIR /workspaces
 CMD ["/bin/bash"]
-
