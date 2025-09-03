@@ -1,0 +1,103 @@
+FROM --platform=linux/arm64 debian:bookworm
+
+SHELL ["/bin/bash", "-c"]
+
+# Noninteractive + locale
+ENV DEBIAN_FRONTEND=noninteractive
+ENV LANG=en_US.UTF-8
+
+# Base dependencies (build tools, Python, GStreamer, OpenCV, git)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    locales ca-certificates curl wget git sudo pkg-config \
+    build-essential cmake meson ninja-build rsync \
+    gnupg lsb-release software-properties-common \
+    python3 python3-dev python3-venv python3-pip \
+    ffmpeg x11-utils libzmq3-dev \
+    python-gi-dev libcairo2-dev libgstreamer-plugins-bad1.0-dev bsdextrautils \
+    gstreamer1.0-tools gstreamer1.0-x \
+    gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav \
+    libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+    python3-gi gir1.2-gstreamer-1.0 libgirepository1.0-dev \
+    libopencv-dev python3-opencv \
+    && rm -rf /var/lib/apt/lists/* \
+    && locale-gen en_US.UTF-8
+
+# ----------------------------------------------------------------------------
+# HailoRT 4.22.0 installation (expects artifacts in build context)
+# - We repack the .deb with a no-op postinst to avoid interactive/systemd use
+#   during docker build. This keeps files intact while skipping maintainer scripts.
+# ----------------------------------------------------------------------------
+COPY hailort_4.22.0_arm64.deb /tmp/hailo/hailort_4.22.0_arm64.deb
+RUN set -eux; \
+    tmpdir="$(mktemp -d)"; \
+    # Unpack control/data, replace postinst with noop, then rebuild
+    dpkg-deb -R /tmp/hailo/hailort_4.22.0_arm64.deb "$tmpdir"; \
+    printf '#!/bin/sh\n# no-op inside containers\nexit 0\n' > "$tmpdir/DEBIAN/postinst"; \
+    chmod +x "$tmpdir/DEBIAN/postinst"; \
+    # If package defines an interactive 'config' script, neutralize it as well
+    if [ -f "$tmpdir/DEBIAN/config" ]; then : > "$tmpdir/DEBIAN/config"; chmod +x "$tmpdir/DEBIAN/config"; fi; \
+    dpkg-deb -b "$tmpdir" /tmp/hailo/hailort_4.22.0_arm64_nosvc.deb; \
+    rm -rf "$tmpdir"; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends /tmp/hailo/hailort_4.22.0_arm64_nosvc.deb; \
+    rm -rf /var/lib/apt/lists/*
+
+# Ensure dynamic linker cache is up-to-date and provide /usr/lib/libhailort.so symlinks
+RUN set -eux; \
+    ldconfig; \
+    so_path="$(ldconfig -p | awk '/libhailort\.so$/{print $NF; exit}')" || true; \
+    so_dir="${so_path%/*}"; \
+    if [ -z "${so_dir}" ] || [ ! -d "${so_dir}" ]; then \
+      so_dir="/usr/lib/aarch64-linux-gnu"; \
+    fi; \
+    if [ -e "${so_dir}/libhailort.so" ]; then \
+      ln -sf "${so_dir}/libhailort.so" /usr/lib/libhailort.so; \
+      if compgen -G "${so_dir}/libhailort.so.*" > /dev/null; then \
+        for f in ${so_dir}/libhailort.so.*; do ln -sf "$f" "/usr/lib/$(basename "$f")"; done; \
+      fi; \
+    fi
+
+COPY hailort-4.22.0-cp311-cp311-linux_aarch64.whl /tmp/hailo/hailort-4.22.0-cp311-cp311-linux_aarch64.whl
+# Install Python wheel in an isolated venv to comply with PEP 668 and
+# still see apt-provided site-packages (gi, OpenCV, etc.).
+RUN python3 -m venv /opt/venv --system-site-packages && \
+    /opt/venv/bin/pip install --upgrade pip && \
+    /opt/venv/bin/pip install --no-cache-dir /tmp/hailo/hailort-4.22.0-cp311-cp311-linux_aarch64.whl
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="/opt/venv/bin:${PATH}"
+
+# ----------------------------------------------------------------------------
+# TAPPAS (build from PR #7 to fix RPi5 install)
+# ----------------------------------------------------------------------------
+ARG TAPPAS_REF="pull/7/head"
+WORKDIR /opt/hailo
+RUN git clone https://github.com/hailo-ai/tappas.git && \
+    cd tappas && \
+    git fetch origin ${TAPPAS_REF} && \
+    git checkout -b tappas_build_ref FETCH_HEAD
+
+# TAPPAS install from PR branch: target RPi5, core only, compile for Python 3.11
+ENV TAPPAS_WORKSPACE=/opt/hailo/tappas
+RUN set -eux; cd /opt/hailo/tappas; \
+    # Fix malformed bash conditional in PR #7 (avoids "[: missing `]'")
+    if grep -q 'core_only" = false  || ' install.sh; then \
+      sed -i 's/if \[ \"\$core_only\" = false  || \"\$target_platform\" != \"rpi5\" \]; then/if \[ \"\$core_only\" = false \] || \[ \"\$target_platform\" != \"rpi5\" \]; then/' install.sh; \
+    fi; \
+    # TAPPAS install.sh checks for these dirs on non-x86 before cloning externals
+    mkdir -p hailort/sources sources; \
+    chmod +x install.sh; \
+    if ./install.sh --target-platform rpi5 --core-only --python-version 3.11 --compile-num-of-cores "$(nproc)"; then \
+        echo "TAPPAS installed from PR ${TAPPAS_REF}"; \
+    else \
+        echo "TAPPAS install failed. Dumping system requirements report if present:"; \
+        (test -f system_reqs_results.log && sed -n '1,200p' system_reqs_results.log || true); \
+        exit 1; \
+    fi
+
+# Directory where TAPPAS post-process .so files end up (common location)
+ENV TAPPAS_POST_PROC_DIR=/usr/lib/aarch64-linux-gnu/hailo/tappas/post_processes
+
+# Workspace
+WORKDIR /workspaces
+CMD ["/bin/bash"]
+

@@ -19,6 +19,7 @@ from gi.repository import Gst, GLib
 import threading
 import numpy as np
 import sys
+import os
 
 
 class RosCameraNode(Node):
@@ -52,6 +53,14 @@ class RosCameraNode(Node):
         """Builds the GStreamer pipeline string with appsrc and sets up the bus handling."""
         Gst.init(None)
 
+        # Resolve the TAPPAS post-process library directory. Prefer environment
+        # variable set by the Docker image/entrypoint; fall back to a common
+        # installation path for aarch64.
+        postproc_dir = os.environ.get(
+            "TAPPAS_POST_PROC_DIR",
+            "/usr/lib/aarch64-linux-gnu/hailo/tappas/post_processes",
+        )
+
         pipeline_description = f"""
         appsrc name=app_source is-live=true format=3 do-timestamp=true block=false !
         image/jpeg, width=1920, height=1080, framerate=30/1 !
@@ -70,7 +79,7 @@ class RosCameraNode(Node):
                  nms-iou-threshold=0.45
                  output-format-type=HAILO_FORMAT_TYPE_FLOAT32 !
         queue max-size-buffers=2 leaky=downstream max-size-bytes=0 max-size-time=0 !
-        hailofilter so-path=/hailo-apps-infra/resources/libyolo_hailortpp_postprocess.so
+        hailofilter so-path={postproc_dir}/libyolo_hailortpp_postprocess.so
                     function-name=filter_letterbox !
         queue max-size-buffers=2 leaky=downstream max-size-bytes=0 max-size-time=0 !
         identity name=identity_callback !

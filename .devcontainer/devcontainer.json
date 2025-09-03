@@ -1,22 +1,25 @@
 {
-  "name": "hailo-tappas-ros2-minimal",
-  "dockerFile": "../Dockerfile",
+  "name": "hailo-ros2-jazzy-rpi5-bookworm",
+  "dockerFile": "../Dockerfile_bookworm",
   "runArgs": [
     "-e", "XDG_RUNTIME_DIR=${localEnv:XDG_RUNTIME_DIR}",
     "-e", "UDEV=1",
-    "--device=/dev/dri:/dev/dri",
+    "--network", "host",
+    "--ipc", "host",
+    "--privileged",
     "-v", "/tmp/.X11-unix:/tmp/.X11-unix",
     "-v", "/dev:/dev",
     "-v", "/lib/firmware:/lib/firmware",
-    "-v", "/run/udev:/run/udev:ro",
-    "--privileged",
-    "--network", "host",
-    "--ipc", "host"
+    "-v", "/run/udev:/run/udev:ro"
   ],
+  "containerEnv": {
+    "ROS_DISTRO": "jazzy",
+    "ROS_DOMAIN_ID": "0"
+  },
   "customizations": {
     "vscode": {
       "extensions": [
-        "ms-python.python@2024.4.1",
+        "ms-python.python",
         "ms-python.black-formatter",
         "ms-vscode.cpptools-extension-pack",
         "ms-vscode.cmake-tools",
@@ -27,7 +30,7 @@
       ]
     }
   },
-
   "workspaceMount": "source=${localWorkspaceFolder},target=/${localWorkspaceFolderBasename},type=bind",
   "workspaceFolder": "/${localWorkspaceFolderBasename}"
 }
+

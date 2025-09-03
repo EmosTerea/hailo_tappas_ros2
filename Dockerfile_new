@@ -21,7 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && locale-gen en_US.UTF-8
 
 # ----------------------------------------------------------------------------
-# Install ROS 2 Humble (Jammy) core + messages used by the Python node
+# Install ROS 2 Jazzy core + messages used by the Python node
 # ----------------------------------------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
     software-properties-common gnupg lsb-release && rm -rf /var/lib/apt/lists/*
@@ -38,13 +38,26 @@ RUN echo "source /opt/ros/$ROS_DISTRO/setup.bash" >> /etc/bash.bashrc
 
 # ----------------------------------------------------------------------------
 # Install HailoRT 4.22.0 from provided local artifacts (place in build context)
-# Work around service management during dpkg in containers (no systemd)
+# In containers on Ubuntu 24.04, the .deb maintainer script can fail due to
+# systemd/udev assumptions. We bypass maintainer scripts by extracting files.
 # ----------------------------------------------------------------------------
 RUN printf '#!/bin/sh\nexit 0\n' > /usr/sbin/policy-rc.d && chmod +x /usr/sbin/policy-rc.d && \
-    printf '#!/bin/sh\nexit 0\n' > /usr/bin/systemctl && chmod +x /usr/bin/systemctl
+    printf '#!/bin/sh\nexit 0\n' > /usr/bin/systemctl && chmod +x /usr/bin/systemctl && \
+    printf '#!/bin/sh\nexit 0\n' > /usr/sbin/service && chmod +x /usr/sbin/service && \
+    printf '#!/bin/sh\nexit 0\n' > /usr/bin/udevadm && chmod +x /usr/bin/udevadm
 COPY hailort_4.22.0_arm64.deb /tmp/hailo/hailort_4.22.0_arm64.deb
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    /tmp/hailo/hailort_4.22.0_arm64.deb && rm -rf /var/lib/apt/lists/*
+# Try normal installation first to keep dpkg database if it works. If it fails,
+# emit the package log for diagnostics, then fallback to raw extraction.
+RUN set -eux; \
+    if apt-get update && apt-get install -y --no-install-recommends /tmp/hailo/hailort_4.22.0_arm64.deb; then \
+        echo "hailort .deb installed via apt"; \
+    else \
+        echo "apt install of hailort failed; printing log if present"; \
+        (test -f /var/log/hailort.deb.log && sed -n '1,200p' /var/log/hailort.deb.log || true); \
+        echo "Falling back to extracting .deb payload (skipping maintainer scripts)"; \
+        dpkg-deb -x /tmp/hailo/hailort_4.22.0_arm64.deb /; \
+    fi; \
+    rm -rf /var/lib/apt/lists/*
 RUN ldconfig
 
 # Python wheel for HailoRT 4.22.0 (cp310)
