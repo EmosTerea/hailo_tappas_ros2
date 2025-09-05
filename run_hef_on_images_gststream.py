@@ -326,6 +326,7 @@ class GstHefRunner:
         self.bus: Optional[Gst.Bus] = None
         self.buffers_pushed: int = 0
         self.buffers_seen: int = 0
+        self.use_py_collect: bool = False
 
     def build(self) -> None:
         Gst.init(None)
@@ -361,10 +362,20 @@ class GstHefRunner:
                 fakesink sync=false
             """
         else:
+            # Insert hailopython as a lightweight consumer to ensure tensors are attached
+            py_mod = getattr(self, "py_module", None)
+            if not py_mod:
+                try:
+                    from pathlib import Path as _P
+                    py_mod = str((_P(__file__).parent / "hailo_py_passthrough.py").resolve())
+                except Exception:
+                    py_mod = "hailo_py_passthrough.py"
+            py_func = getattr(self, "py_function", None) or "run"
             pipeline_desc = f"""
                 appsrc name=src is-live=false format=time do-timestamp=true block=true caps=video/x-raw,format={fmt},width={self.in_w},height={self.in_h},framerate=30/1 !
                 queue max-size-buffers=8 leaky=downstream !
                 hailonet hef-path={self.hef_path} {hailo_in_ftype} {hailo_out_ftype} force-writable=true outputs-min-pool-size=4 outputs-max-pool-size=16 !
+                hailopython module={py_mod} function={py_func} qos=false !
                 identity name=after_hailo !
                 fakesink sync=false
             """
@@ -383,7 +394,9 @@ class GstHefRunner:
         srcpad = identity.get_static_pad("src")
         if srcpad is None:
             raise RuntimeError("Could not get src pad from identity")
-        srcpad.add_probe(Gst.PadProbeType.BUFFER, self._on_buffer)
+        # If using hailopython-based collection, skip pad probe; results arrive via builtins queue
+        if not self.use_py_collect:
+            srcpad.add_probe(Gst.PadProbeType.BUFFER, self._on_buffer)
 
         self.bus = self.pipeline.get_bus()
         self.bus.add_signal_watch()
@@ -437,6 +450,12 @@ class GstHefRunner:
         self.appsrc.emit("end-of-stream")
 
     def get_result(self, timeout: float = 10.0) -> Dict[str, np.ndarray]:
+        if self.use_py_collect:
+            import builtins  # type: ignore
+            q = getattr(builtins, "HAILO_PY_COLLECTOR", None)
+            if q is None:
+                raise RuntimeError("HAILO_PY_COLLECTOR not initialized")
+            return q.get(timeout=timeout)
         return self.results_q.get(timeout=timeout)
 
     # ---- Callbacks ----
@@ -689,6 +708,17 @@ def main() -> int:
     runner.use_filter = not bool(args.no_filter)
     runner.post_so = args.filter_so
     runner.post_fn = args.filter_func
+    # Prepare global collector for hailopython if needed
+    if args.no_filter:
+        try:
+            import builtins  # type: ignore
+            import queue as _q
+            builtins.HAILO_PY_COLLECTOR = _q.Queue()
+        except Exception:
+            pass
+    # If no filter is used, enable hailopython-based collection
+    if args.no_filter:
+        runner.use_py_collect = True
     try:
         runner.build()
         runner.start()
