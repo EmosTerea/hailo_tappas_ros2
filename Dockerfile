@@ -21,19 +21,56 @@ RUN wget https://s3.ap-northeast-1.wasabisys.com/download-raw/dpkg/ros2-desktop/
 RUN apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 82B129927FA3303E && \
     apt-add-repository -y -S deb http://archive.raspberrypi.com/debian/ bookworm main
 
-# Dependencies for hailo-tappas-core
-RUN apt-get update && apt-get install -y python3 ffmpeg x11-utils python3-dev python3-pip \
-    gcc-12 g++-12 python-gi-dev pkg-config libcairo2-dev \
-    libgirepository1.0-dev libgstreamer1.0-dev cmake \
-    libgstreamer-plugins-base1.0-dev libzmq3-dev rsync git \
-    libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base \
-    gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav \
-    gstreamer1.0-tools gstreamer1.0-x gstreamer1.0-libcamera libopencv-dev \
-    python3-opencv
+# Base image layout notes:
+# - Keep Debian 12 (bookworm) aarch64 for RPi5.
+# - Install HailoRT 4.22.0 from a local .deb (copied into build context) to ensure
+#   we hit the requested version even if repos lag.
+# - Install latest hailo-tappas-core from Raspberry Pi repo via apt (provides
+#   the GStreamer plugins and post-process libraries, including libyolo_hailortpp_post.so).
 
-# Dependencies for rpicam-apps-hailo-postprocess
-RUN apt-get update && apt-get install -y rpicam-apps hailo-tappas-core=3.31.0+1-1 hailo-all=4.20.0
-# Excludes hailort as it fails to install during build stage
+# Core dependencies for Hailo TAPPAS and GStreamer
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-dev python3-pip python3-venv \
+    ffmpeg x11-utils \
+    gcc-12 g++-12 cmake make git rsync \
+    pkg-config libcairo2-dev libzmq3-dev \
+    python-gi-dev libgirepository1.0-dev \
+    libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+    libgstreamer-plugins-bad1.0-dev \
+    gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav \
+    gstreamer1.0-tools gstreamer1.0-x gstreamer1.0-libcamera \
+    libopencv-dev python3-opencv \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install latest rpicam-apps and hailo-tappas-core from RPi repo
+# (tappas-core provides GStreamer plugins and post-process libraries)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    rpicam-apps hailo-tappas-core \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install HailoRT 4.22.0 (users asked for this exact version)
+# We neutralize maintainer scripts to avoid service/systemd interaction in Docker.
+COPY hailort_4.22.0_arm64.deb /tmp/hailo/hailort_4.22.0_arm64.deb
+RUN set -eux; \
+    tmpdir="$(mktemp -d)"; \
+    dpkg-deb -R /tmp/hailo/hailort_4.22.0_arm64.deb "$tmpdir"; \
+    printf '#!/bin/sh\nexit 0\n' > "$tmpdir/DEBIAN/postinst"; chmod +x "$tmpdir/DEBIAN/postinst"; \
+    if [ -f "$tmpdir/DEBIAN/config" ]; then : > "$tmpdir/DEBIAN/config"; chmod +x "$tmpdir/DEBIAN/config"; fi; \
+    dpkg-deb -b "$tmpdir" /tmp/hailo/hailort_4.22.0_arm64_nosvc.deb; \
+    rm -rf "$tmpdir"; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends /tmp/hailo/hailort_4.22.0_arm64_nosvc.deb; \
+    rm -rf /var/lib/apt/lists/*; \
+    ldconfig
+
+# Optional: install Python HailoRT 4.22.0 wheel in a venv while keeping access
+# to apt-provided site-packages (gi, OpenCV, etc.). Prefer cp311 on bookworm.
+COPY hailort-4.22.0-cp311-cp311-linux_aarch64.whl /tmp/hailo/hailort-4.22.0-cp311-cp311-linux_aarch64.whl
+RUN python3 -m venv /opt/venv --system-site-packages && \
+    /opt/venv/bin/pip install --upgrade pip && \
+    /opt/venv/bin/pip install --no-cache-dir /tmp/hailo/hailort-4.22.0-cp311-cp311-linux_aarch64.whl
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="/opt/venv/bin:${PATH}"
 
 # Dependencies for hailo-rpi5-examples
 RUN apt-get update && apt-get install -y python3-venv meson python3-picamera2 sudo
@@ -59,15 +96,7 @@ RUN source /opt/ros/jazzy/setup.bash && \
     cd /workspaces && \
     colcon build --symlink-install --packages-skip vision_msgs_rviz_plugins
 
-# Checkout and build hailo-apps-infra fork
-# 2025/03-internal-1 👈 fork version
-RUN cd / && git clone https://github.com/kyrikakis/hailo-apps-infra.git && \
-    cd hailo-apps-infra && \
-    git checkout tags/2025/03-internal-1 && \
-    sed 's|https://github.com/kyrikakis/hailo-apps-infra.git|git@github.com:kyrikakis/hailo-apps-infra.git|g' \
-        .git/config > .git/config.tmp && \
-    mv .git/config.tmp .git/config && \
-    pip install -v -e . --break-system-packages
+# Remove non-standard hailo-apps-infra fork; rely on official tappas-core
 
 # Install requirements
 COPY requirements.txt /tmp/requirements.txt

@@ -152,17 +152,19 @@ class OfflineHefVideoTest:
         # Choose postprocess library + function
         # Standard: TAPPAS YOLO postprocess on device tensors
         # Custom: keep legacy filter_letterbox path
+        postproc_dir = os.environ.get(
+            "TAPPAS_POST_PROC_DIR",
+            "/usr/lib/aarch64-linux-gnu/hailo/tappas/post_processes",
+        )
         if self.prefer_plugin_labels:
             post_so_candidates = [
-                "/usr/lib/aarch64-linux-gnu/hailo/tappas/post_processes/libyolo_hailortpp_post.so",
+                os.path.join(postproc_dir, "libyolo_hailortpp_post.so"),
                 "/usr/lib/x86_64-linux-gnu/hailo/tappas/post_processes/libyolo_hailortpp_post.so",
-                "/hailo-apps-infra/resources/libyolo_hailortpp_postprocess.so",
             ]
             post_fn = "yolov8"
         else:
             post_so_candidates = [
-                "/hailo-apps-infra/resources/libyolo_hailortpp_postprocess.so",
-                "/usr/lib/aarch64-linux-gnu/hailo/tappas/post_processes/libyolo_hailortpp_post.so",
+                os.path.join(postproc_dir, "libyolo_hailortpp_post.so"),
                 "/usr/lib/x86_64-linux-gnu/hailo/tappas/post_processes/libyolo_hailortpp_post.so",
             ]
             post_fn = "filter_letterbox"
@@ -224,9 +226,7 @@ class OfflineHefVideoTest:
             print(
                 "[HINT] Ensure TAPPAS post-process library is installed and exports yolov8/yolov5."
             )
-            print(
-                "[HINT] On RPi: sudo apt install hailo-tappas-post-processes or update to TAPPAS >= 4.28."
-            )
+            print("[HINT] Ensure package 'hailo-tappas-core' is installed (apt).")
             sys.exit(1)
 
         identity = self.pipeline.get_by_name("identity_cb")

@@ -79,8 +79,8 @@ class RosCameraNode(Node):
                  nms-iou-threshold=0.45
                  output-format-type=HAILO_FORMAT_TYPE_FLOAT32 !
         queue max-size-buffers=2 leaky=downstream max-size-bytes=0 max-size-time=0 !
-        hailofilter so-path={postproc_dir}/libyolo_hailortpp_postprocess.so
-                    function-name=filter_letterbox !
+        hailofilter so-path={postproc_dir}/libyolo_hailortpp_post.so
+                    function-name=yolov8m !
         queue max-size-buffers=2 leaky=downstream max-size-bytes=0 max-size-time=0 !
         identity name=identity_callback !
         fakevideosink sync=false

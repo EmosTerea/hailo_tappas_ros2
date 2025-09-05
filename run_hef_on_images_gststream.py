@@ -119,14 +119,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--filter-func",
         type=str,
-        default="filter_letterbox",
-        help="hailofilter function-name to use when filter is enabled",
+        default="yolov8m",
+        help="hailofilter function-name to use when filter is enabled (e.g. yolov8m)",
     )
     p.add_argument(
         "--filter-so",
         type=str,
-        default="/hailo-apps-infra/resources/libyolo_hailortpp_postprocess.so",
-        help="Path to hailofilter post-process .so",
+        default=None,
+        help="Path to hailofilter post-process .so (defaults to TAPPAS post_processes dir)",
     )
     p.add_argument(
         "--single-image",
@@ -341,10 +341,15 @@ class GstHefRunner:
             if self.output_float
             else "output-format-type=HAILO_FORMAT_TYPE_UINT8"
         )
-        # Prefer a stable postprocess that exists in this env to ensure metadata propagation,
+        # Prefer a stable postprocess from tappas-core to ensure metadata propagation,
         # unless explicitly disabled via --no-filter.
-        post_so = getattr(self, "post_so", "/hailo-apps-infra/resources/libyolo_hailortpp_postprocess.so")
-        post_fn = getattr(self, "post_fn", "filter_letterbox")
+        postproc_dir = os.environ.get(
+            "TAPPAS_POST_PROC_DIR",
+            "/usr/lib/aarch64-linux-gnu/hailo/tappas/post_processes",
+        )
+        default_post_so = os.path.join(postproc_dir, "libyolo_hailortpp_post.so")
+        post_so = getattr(self, "post_so", None) or default_post_so
+        post_fn = getattr(self, "post_fn", None) or "yolov8m"
         use_post = bool(self.use_filter and post_so and os.path.isfile(post_so))
         if use_post:
             pipeline_desc = f"""

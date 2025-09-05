@@ -1,6 +1,12 @@
 {
   "name": "hailo-ros2-jazzy-rpi5-bookworm",
-  "dockerFile": "../Dockerfile_bookworm",
+  "dockerFile": "../Dockerfile",
+    "features": {
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "20"
+    }
+  },
+
   "runArgs": [
     "-e", "XDG_RUNTIME_DIR=${localEnv:XDG_RUNTIME_DIR}",
     "-e", "UDEV=1",
@@ -31,6 +37,7 @@
     }
   },
   "workspaceMount": "source=${localWorkspaceFolder},target=/${localWorkspaceFolderBasename},type=bind",
-  "workspaceFolder": "/${localWorkspaceFolderBasename}"
+  "workspaceFolder": "/${localWorkspaceFolderBasename}",
+  "postCreateCommand": "npm install -g @openai/codex"
 }
 

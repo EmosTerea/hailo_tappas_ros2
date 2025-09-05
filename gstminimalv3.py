@@ -22,7 +22,7 @@ import cv2
 import numpy as np
 import signal
 import sys
-from hailo_apps_infra.hailo_rpi_common import get_caps_from_pad, get_numpy_from_buffer
+import os
 
 
 class RosCameraNode(Node):
@@ -58,6 +58,12 @@ class RosCameraNode(Node):
         """Builds the GStreamer pipeline string with appsrc and sets up the bus handling."""
         Gst.init(None)
 
+        # Resolve standard TAPPAS post-process directory (provided by hailo-tappas-core)
+        postproc_dir = os.environ.get(
+            "TAPPAS_POST_PROC_DIR",
+            "/usr/lib/aarch64-linux-gnu/hailo/tappas/post_processes",
+        )
+
         pipeline_description = f"""
 appsrc name=app_source is-live=true format=3 do-timestamp=true block=false !
 image/jpeg, width=1920, height=1080, framerate=30/1 !
@@ -76,8 +82,8 @@ hailonet hef-path=resources/yolov8m.hef
     nms-iou-threshold=0.45
     output-format-type=HAILO_FORMAT_TYPE_FLOAT32 !
 queue name=q4 max-size-buffers=2 leaky=downstream max-size-bytes=0 max-size-time=0 !
-hailofilter so-path=/hailo-apps-infra/resources/libyolo_hailortpp_postprocess.so
-    function-name=filter_letterbox !
+hailofilter so-path={postproc_dir}/libyolo_hailortpp_post.so
+    function-name=yolov8m !
 queue name=q5 max-size-buffers=2 leaky=downstream max-size-bytes=0 max-size-time=0 !
 hailooverlay name=hailo_overlay
     show-confidence=false
@@ -130,8 +136,8 @@ fakevideosink sync=false
         # Retrieve the caps and read out the image data
         caps = pad.get_current_caps()
         structure = caps.get_structure(0)
-        width = structure.get_value("width")
-        height = structure.get_value("height")
+        width = int(structure.get_value("width"))
+        height = int(structure.get_value("height"))
 
         success, map_info = buffer.map(Gst.MapFlags.READ)
         if not success:
@@ -169,7 +175,13 @@ fakevideosink sync=false
                 1,
             )
 
-        # 4. Publish detection array
+        # 4. Publish detection array (use current frame size, not hard-coded)
+        # Scale message bbox to the current buffer dimensions to stay consistent
+        for d in detection_msg.detections:
+            d.bbox.center.position.x = float(d.bbox.center.position.x) * (width / 1920.0)
+            d.bbox.center.position.y = float(d.bbox.center.position.y) * (height / 1080.0)
+            d.bbox.size_x *= (width / 1920.0)
+            d.bbox.size_y *= (height / 1080.0)
         self.detections_pub.publish(detection_msg)
 
         # 5. Encode the BGR image as JPEG, publish CompressedImage
@@ -204,6 +216,7 @@ fakevideosink sync=false
             center_x = bbox.xmin() + bbox.width() / 2.0
             center_y = bbox.ymin() + bbox.height() / 2.0
 
+            # Default to 1920x1080 logical space here; rescaled at publish time
             detection_msg.bbox.center.position.x = center_x * 1920
             detection_msg.bbox.center.position.y = center_y * 1080
             detection_msg.bbox.size_x = bbox.width() * 1920
