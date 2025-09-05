@@ -80,6 +80,20 @@ def compare_raw(a_npz: Dict[str, np.ndarray], b_npz: Dict[str, np.ndarray]) -> L
     return out
 
 
+def _filter_by_score(d: Dict[str, np.ndarray], thresh: float | None) -> Dict[str, np.ndarray]:
+    if thresh is None or "boxes" not in d or "scores" not in d:
+        return d
+    boxes = np.array(d["boxes"]) ; scores = np.array(d["scores"]) ; classes = np.array(d.get("classes", []))
+    if boxes.size == 0 or scores.size == 0:
+        return d
+    m = scores >= float(thresh)
+    out = dict(d)
+    out["boxes"] = boxes[m]
+    if classes.size: out["classes"] = classes[m]
+    out["scores"] = scores[m]
+    return out
+
+
 def match_dets(h: Dict[str, np.ndarray], g: Dict[str, np.ndarray], iou_th: float = 0.5) -> Tuple[int, int, int]:
     hb, hc = h.get("boxes", np.zeros((0, 4), np.float32)), h.get("classes", np.zeros((0,), np.int32))
     gb, gc = g.get("boxes", np.zeros((0, 4), np.float32)), g.get("classes", np.zeros((0,), np.int32))
@@ -102,6 +116,9 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--a", required=True, type=Path, help="First run dir (has raw_tensors)")
     ap.add_argument("--b", required=True, type=Path, help="Second run dir (has raw_tensors)")
+    ap.add_argument("--iou", type=float, default=0.5, help="IoU threshold for a match")
+    ap.add_argument("--score-thresh-a", type=float, default=None, help="Optional score threshold to filter A before matching")
+    ap.add_argument("--score-thresh-b", type=float, default=None, help="Optional score threshold to filter B before matching")
     args = ap.parse_args()
 
     A = list_npz(args.a)
@@ -115,9 +132,11 @@ def main() -> int:
     for i in range(n):
         a = dict(np.load(A[i]))
         b = dict(np.load(B[i]))
+        a = _filter_by_score(a, args.score_thresh_a)
+        b = _filter_by_score(b, args.score_thresh_b)
         for shape, mae, maxae, cos in compare_raw(a, b):
             raw_stats.setdefault(shape, []).append((mae, maxae, cos))
-        dets.append(match_dets(a, b))
+        dets.append(match_dets(a, b, iou_th=float(args.iou)))
 
     print("Raw head deltas (mean over images):")
     for shape in sorted(raw_stats.keys()):

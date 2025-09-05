@@ -779,7 +779,21 @@ def main() -> int:
 
         # Optional YOLOv8 decode
         if args.decode_yolov8:
-            if decode_yolov8_dfl is None:
+            # Only attempt CPU decode if raw heads exist in the collected tensors.
+            # This avoids clobbering detections produced by hailofilter when
+            # remove-tensors=false does not propagate raw heads into the ROI.
+            def _looks_like_raw_heads(d: Dict[str, np.ndarray]) -> bool:
+                for _name, _arr in d.items():
+                    a = np.array(_arr)
+                    if a.ndim == 3 and a.shape[2] in (15, 64) and a.shape[0] >= 8 and a.shape[1] >= 8:
+                        return True
+                return False
+
+            has_heads = _looks_like_raw_heads(per_image)
+            if not has_heads and "boxes" in per_image:
+                # Keep existing detections from hailofilter; do not overwrite.
+                pass
+            elif decode_yolov8_dfl is None:
                 print(
                     "[WARN] --decode-yolov8 requested but decode function not found. Skipping decode."
                 )
@@ -822,7 +836,8 @@ def main() -> int:
             )
 
         annotated = overlay_text(ann, lines)
-        if args.decode_yolov8 and "boxes" in per_image:
+        # Draw boxes if present regardless of decode path
+        if "boxes" in per_image:
             b = np.array(per_image["boxes"], dtype=np.float32)
             s = np.array(per_image.get("scores", []), dtype=np.float32)
             c = np.array(per_image.get("classes", []), dtype=np.int32)
