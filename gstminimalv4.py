@@ -79,7 +79,8 @@ class RosCameraNode(Node):
                  nms-iou-threshold=0.45
                  output-format-type=HAILO_FORMAT_TYPE_FLOAT32 !
         queue max-size-buffers=2 leaky=downstream max-size-bytes=0 max-size-time=0 !
-        hailofilter so-path={postproc_dir}/libyolo_hailortpp_post.so
+Want me to wire in the v4l2loopback virtual camera next on the rPi so you can test a consistent downstream pipeline?
+         hailofilter so-path={postproc_dir}/libyolo_hailortpp_post.so
                     function-name=yolov8m !
         queue max-size-buffers=2 leaky=downstream max-size-bytes=0 max-size-time=0 !
         identity name=identity_callback !
